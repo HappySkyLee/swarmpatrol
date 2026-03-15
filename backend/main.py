@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from datetime import datetime, timezone
 
 from typing import Any
 
@@ -63,6 +64,14 @@ simulation_lock = threading.Lock()
 stop_simulation_event = threading.Event()
 simulation_thread: threading.Thread | None = None
 SIMULATION_STEP_SECONDS = float(os.getenv("SIMULATION_STEP_SECONDS", "3"))
+dashboard_sync_lock = threading.Lock()
+dashboard_sync_state: dict[str, object] = {
+    "last_update_utc": None,
+    "mission_started": False,
+    "telemetry_count": 0,
+    "log_count": 0,
+    "survivor_count": 0,
+}
 
 
 def _require_orchestrator() -> Any:
@@ -111,6 +120,9 @@ def health() -> dict[str, object]:
         round_count = int(model.round_count)
         elapsed_minutes = int(model.elapsed_minutes)
 
+    with dashboard_sync_lock:
+        sync_snapshot = dict(dashboard_sync_state)
+
     return {
         "status": "ok",
         "model": type(model).__name__,
@@ -120,6 +132,29 @@ def health() -> dict[str, object]:
         "round": round_count,
         "elapsed_minutes": elapsed_minutes,
         "step_interval_seconds": SIMULATION_STEP_SECONDS,
+        "dashboard_sync": sync_snapshot,
+    }
+
+
+@app.post("/dashboard_sync")
+def dashboard_sync(payload: dict[str, object]) -> dict[str, object]:
+    """Receive dashboard UI update snapshots from frontend."""
+    mission_started = bool(payload.get("mission_started", False))
+    telemetry_count = int(payload.get("telemetry_count", 0))
+    log_count = int(payload.get("log_count", 0))
+    survivor_count = int(payload.get("survivor_count", 0))
+
+    with dashboard_sync_lock:
+        dashboard_sync_state["last_update_utc"] = datetime.now(timezone.utc).isoformat()
+        dashboard_sync_state["mission_started"] = mission_started
+        dashboard_sync_state["telemetry_count"] = max(0, telemetry_count)
+        dashboard_sync_state["log_count"] = max(0, log_count)
+        dashboard_sync_state["survivor_count"] = max(0, survivor_count)
+        snapshot = dict(dashboard_sync_state)
+
+    return {
+        "status": "dashboard_sync_recorded",
+        "dashboard_sync": snapshot,
     }
 
 

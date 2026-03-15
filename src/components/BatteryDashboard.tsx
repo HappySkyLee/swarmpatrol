@@ -9,9 +9,9 @@ type BatteryDashboardProps = {
 
 export default function BatteryDashboard({ drones }: BatteryDashboardProps) {
   return (
-    <section className="h-full rounded-2xl border border-slate-200 bg-white/80 p-5 shadow-sm backdrop-blur">
+    <section className="flex h-full min-h-0 flex-col rounded-2xl border border-slate-200 bg-white/80 p-5 shadow-sm backdrop-blur">
       <h2 className="mb-3 text-lg font-semibold text-slate-900">BatteryDashboard</h2>
-      <div className="space-y-3">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
         {drones.length === 0 ? (
           <p className="text-sm text-slate-500">No telemetry loaded.</p>
         ) : (

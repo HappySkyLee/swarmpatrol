@@ -22,12 +22,20 @@ type HealthResponse = {
   orchestrator_error?: string | null;
 };
 
+type DashboardSyncPayload = {
+  mission_started: boolean;
+  telemetry_count: number;
+  log_count: number;
+  survivor_count: number;
+};
+
 export default function Home() {
   const [missionStarted, setMissionStarted] = useState(false);
   const [missionLoading, setMissionLoading] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const lastSyncPayloadRef = useRef<string>("");
 
   useEffect(() => {
     return () => {
@@ -66,6 +74,29 @@ export default function Home() {
       window.clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    const payload: DashboardSyncPayload = {
+      mission_started: missionStarted,
+      telemetry_count: telemetry.length,
+      log_count: logs.length,
+      survivor_count: 0,
+    };
+
+    const payloadKey = JSON.stringify(payload);
+    if (payloadKey === lastSyncPayloadRef.current) {
+      return;
+    }
+
+    lastSyncPayloadRef.current = payloadKey;
+    void fetch(`${BACKEND_BASE_URL}/dashboard_sync`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: payloadKey,
+    });
+  }, [missionStarted, telemetry.length, logs.length]);
 
   const checkMissionReadiness = async (): Promise<{ ok: boolean; reason?: string }> => {
     try {
@@ -172,7 +203,7 @@ export default function Home() {
 
   return (
     <main className="h-screen overflow-hidden bg-gradient-to-br from-slate-100 via-sky-50 to-cyan-100 p-3 md:p-4">
-      <div className="mx-auto flex w-full max-w-[1400px] items-center justify-between pb-3">
+      <div className="mx-auto flex w-full items-center justify-between pb-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 md:text-3xl">Swarm Mission Dashboard</h1>
           <p className="text-sm text-slate-600">Command Agent Base: (10,10)</p>
@@ -193,12 +224,12 @@ export default function Home() {
         </div>
       </div>
 
-      <section className="mx-auto grid h-[calc(100vh-6.5rem)] w-full max-w-[1400px] min-h-0 grid-cols-1 gap-3 lg:grid-cols-5">
-        <div className="min-h-0 lg:col-span-3 lg:h-full">
+      <section className="mx-auto grid h-[calc(100vh-6.5rem)] w-full min-h-0 grid-cols-1 gap-3 lg:grid-cols-12">
+        <div className="min-h-0 lg:col-span-5 lg:h-full xl:col-span-5">
           <GridMap missionStarted={missionStarted} />
         </div>
 
-        <div className="grid min-h-0 gap-3 lg:col-span-2 lg:grid-rows-2">
+        <div className="grid min-h-0 gap-3 lg:col-span-7 lg:grid-rows-2 xl:col-span-7">
           <div className="min-h-0">
             <MissionLog logs={logs} />
           </div>
