@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+try:
+    from langchain.agents import AgentExecutor, create_tool_calling_agent
+except Exception:
+    from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
@@ -21,7 +26,7 @@ SYSTEM_PROMPT = (
     "and decide whether to dispatch a second drone for multimodal verification or continue sweep. "
     "Only use verify_survivor after this triage decision is justified. "
     "When a survivor is verified, transition to Human Rescue Routing: call plan_human_rescue_route "
-    "to compute an A* path from base (20,20) to the verified location."
+    "to compute an A* path from base (10,10) to the verified location."
 )
 
 
@@ -160,23 +165,54 @@ HUMAN_RESCUE_ROUTING_POLICY = (
     "Human Rescue Routing policy:\n"
     "1) If verify_survivor returns Confirmed Survivor, do not end the turn immediately.\n"
     "2) Call plan_human_rescue_route(x, y) for the confirmed location in the same decision cycle.\n"
-    "3) Ensure the route is A*-based and originates from base (20,20).\n"
+    "3) Ensure the route is A*-based and originates from base (10,10).\n"
     "4) Report route readiness, path cost, and handoff instructions for human rescue teams."
 )
 
 
 async def _load_mcp_tools(server_script: str = "mcp_server.py") -> list[Any]:
     """Load all tools exposed by the MCP server via the LangChain MCP adapter."""
+    script_path = (
+        server_script
+        if os.path.isabs(server_script)
+        else os.path.join(os.path.dirname(__file__), server_script)
+    )
+
     client = MultiServerMCPClient(
         {
             "swarm-sim": {
                 "transport": "stdio",
-                "command": "python",
-                "args": [server_script],
+                "command": sys.executable,
+                "args": [script_path],
             }
         }
     )
     return await client.get_tools()
+
+
+def _run_coroutine_sync(coro: Any) -> Any:
+    """Run a coroutine from sync code, even if an event loop is already running."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: dict[str, Any] = {}
+    error: dict[str, Exception] = {}
+
+    def _runner() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except Exception as exc:  # pragma: no cover - passthrough
+            error["value"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+
+    if "value" in error:
+        raise error["value"]
+    return result.get("value")
 
 
 def _build_llm() -> ChatOpenAI:
@@ -195,7 +231,7 @@ def _build_llm() -> ChatOpenAI:
 
 def create_orchestrator(server_script: str = "mcp_server.py") -> AgentExecutor:
     """Create a LangChain agent executor bound to all MCP tools."""
-    tools = asyncio.run(_load_mcp_tools(server_script=server_script))
+    tools = _run_coroutine_sync(_load_mcp_tools(server_script=server_script))
     llm = _build_llm()
 
     prompt = ChatPromptTemplate.from_messages(

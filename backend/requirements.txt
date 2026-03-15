@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+fastmcp
+langchain
+langchain-core
+langchain-openai
+langchain-classic
+langchain-mcp-adapters
+mesa
+networkx
+numpy
+python-dotenv

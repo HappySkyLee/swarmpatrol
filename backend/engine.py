@@ -4,9 +4,9 @@ from mesa import Agent, Model as MesaModel
 
 
 CELL_SIZE_METERS = 100
-GRID_WIDTH = 40
-GRID_HEIGHT = 40
-COMMAND_AGENT_ORIGIN = (20, 20)
+GRID_WIDTH = 21
+GRID_HEIGHT = 21
+COMMAND_AGENT_ORIGIN = (10, 10)
 
 
 class Drone(Agent):
@@ -56,7 +56,7 @@ class Drone(Agent):
         return result
 
 
-# 40x40 search area; each cell represents 100m x 100m.
+
 search_area = np.ones((GRID_HEIGHT, GRID_WIDTH), dtype=int)
 
 # Randomly assign 10% of cells as heavy smoke (weight 3).
@@ -66,7 +66,7 @@ hazard_cells = int(total_cells * 0.10)
 hazard_indices = rng.choice(total_cells, size=hazard_cells, replace=False)
 search_area.flat[hazard_indices] = 3
 
-# Keep deployment base clear: (x=20, y=20).
+# Keep deployment base clear: (x=10, y=10).
 search_area[COMMAND_AGENT_ORIGIN[1], COMMAND_AGENT_ORIGIN[0]] = 1
 
 

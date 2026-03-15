@@ -3,27 +3,48 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
+
+from typing import Any
 
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from dotenv import load_dotenv
 
-from agent_orchestrator import CommandAgentOrchestrator
+# Load .env file so OPENAI_API_KEY and other secrets are available before AI init.
+load_dotenv()
+
 from engine import CELL_SIZE_METERS, SwarmModel as Model
+
+try:
+    from agent_orchestrator import CommandAgentOrchestrator
+
+    ORCHESTRATOR_IMPORT_ERROR: str | None = None
+except Exception as exc:
+    CommandAgentOrchestrator = None
+    ORCHESTRATOR_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
 
 app = FastAPI(title="Swarm Intelligence API")
 
-# Frontend origin for local Next.js development.
-frontend_origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
+# Frontend origins for local Next.js development.
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if origin.strip()
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=frontend_origins,
+    allow_origins=allowed_origins,
+    allow_origin_regex=os.getenv(
+        "ALLOWED_ORIGIN_REGEX",
+        r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -32,11 +53,29 @@ app.add_middleware(
 
 # Shared backend objects.
 model = Model(num_drones=3)
-orchestrator = CommandAgentOrchestrator(server_script="mcp_server.py")
+orchestrator = None
+if CommandAgentOrchestrator is not None:
+    try:
+        orchestrator = CommandAgentOrchestrator(server_script="mcp_server.py")
+    except BaseException as exc:
+        ORCHESTRATOR_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 simulation_lock = threading.Lock()
 stop_simulation_event = threading.Event()
 simulation_thread: threading.Thread | None = None
 SIMULATION_STEP_SECONDS = float(os.getenv("SIMULATION_STEP_SECONDS", "3"))
+
+
+def _require_orchestrator() -> Any:
+    if orchestrator is None:
+        reason = ORCHESTRATOR_IMPORT_ERROR or "orchestrator unavailable"
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Mission orchestrator is unavailable. Install backend AI dependencies "
+                f"and restart the API. Root cause: {reason}"
+            ),
+        )
+    return orchestrator
 
 
 def _simulation_loop() -> None:
@@ -75,7 +114,9 @@ def health() -> dict[str, object]:
     return {
         "status": "ok",
         "model": type(model).__name__,
-        "orchestrator": type(orchestrator).__name__,
+        "orchestrator": type(orchestrator).__name__ if orchestrator else "unavailable",
+        "orchestrator_ready": orchestrator is not None,
+        "orchestrator_error": ORCHESTRATOR_IMPORT_ERROR,
         "round": round_count,
         "elapsed_minutes": elapsed_minutes,
         "step_interval_seconds": SIMULATION_STEP_SECONDS,
@@ -85,14 +126,15 @@ def health() -> dict[str, object]:
 @app.post("/start_mission")
 def start_mission() -> dict[str, object]:
     """Start high-level mission planning for the command agent."""
+    active_orchestrator = _require_orchestrator()
     planning_prompt = (
-        "Start high-level mission planning from base (20,20). "
+        "Start high-level mission planning from base (10,10). "
         "Discover active drones and produce the initial search-and-rescue plan."
     )
-    planning_result = orchestrator.invoke(planning_prompt)
+    planning_result = active_orchestrator.invoke(planning_prompt)
 
     return {
-        "message": "Command Agent at (20,20) has initiated the search-and-rescue operation.",
+        "message": "Command Agent at (10,10) has initiated the search-and-rescue operation.",
         "mission_started": True,
         "agent_output": planning_result.get("output", ""),
     }
@@ -156,13 +198,14 @@ def _format_sse(event: str, data: dict[str, object]) -> str:
 
 @app.get("/mission_log")
 def mission_log(
-    objective: str = "Start high-level mission planning from base (20,20).",
+    objective: str = "Start high-level mission planning from base (10,10).",
 ) -> StreamingResponse:
     """Stream mission reasoning/events via Server-Sent Events (SSE)."""
+    active_orchestrator = _require_orchestrator()
 
     def event_stream():
         yield _format_sse("status", {"message": "mission_log stream started"})
-        for event in orchestrator.stream_mission_events(objective):
+        for event in active_orchestrator.stream_mission_events(objective):
             event_name = str(event.get("event", "message"))
             event_data = event.get("data", {})
             if not isinstance(event_data, dict):

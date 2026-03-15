@@ -180,7 +180,7 @@ def verify_survivor(drone_id: int) -> dict[str, Any]:
 
 @mcp.tool()
 def plan_human_rescue_route(x: int, y: int) -> dict[str, Any]:
-    """Plan A* rescue-team route from base (20,20) to a verified survivor."""
+    """Plan A* rescue-team route from base (10,10) to a verified survivor."""
     model = get_active_model()
     width = model.search_grid.shape[1]
     height = model.search_grid.shape[0]

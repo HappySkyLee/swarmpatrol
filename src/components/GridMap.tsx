@@ -23,11 +23,13 @@ type DroneTelemetry = {
 const BACKEND_BASE_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
+const COMMAND_AGENT_BASE = { x: 10, y: 10 };
+
 const defaultGrid = {
-  width: 40,
-  height: 40,
-  cell_status: Array.from({ length: 40 }, () =>
-    Array.from({ length: 40 }, () => "unvisited")
+  width: 21,
+  height: 21,
+  cell_status: Array.from({ length: 21 }, () =>
+    Array.from({ length: 21 }, () => "unvisited")
   ),
 };
 
@@ -35,10 +37,15 @@ export default function GridMap({ missionStarted }: GridMapProps) {
   const [grid, setGrid] = useState<GridStateResponse>(defaultGrid);
   const [drones, setDrones] = useState<DroneTelemetry[]>([]);
 
-  const flattenedCells = useMemo(
-    () => grid.cell_status.flatMap((row) => row),
-    [grid.cell_status]
-  );
+  const flattenedCells = useMemo(() => {
+    const cells: string[] = [];
+    for (let y = 0; y < grid.height; y += 1) {
+      for (let x = 0; x < grid.width; x += 1) {
+        cells.push(grid.cell_status[y]?.[x] ?? "unvisited");
+      }
+    }
+    return cells;
+  }, [grid.cell_status, grid.height, grid.width]);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,12 +82,18 @@ export default function GridMap({ missionStarted }: GridMapProps) {
     };
   }, []);
 
-  const cellClass = (status: string) => {
-    if (status === "clear") {
-      return "bg-emerald-500/80";
+  const cellClass = (status: string, x: number, y: number) => {
+    if (x === COMMAND_AGENT_BASE.x && y === COMMAND_AGENT_BASE.y) {
+      return "bg-black";
     }
     if (status === "suspect") {
       return "animate-pulse bg-orange-400";
+    }
+    if (status === "survivor_found" || status === "survivor") {
+      return "bg-red-500";
+    }
+    if (status === "clear") {
+      return "bg-slate-700";
     }
     return "bg-slate-300";
   };
@@ -104,12 +117,22 @@ export default function GridMap({ missionStarted }: GridMapProps) {
         <div
           className="grid h-full w-full gap-[1px]"
           style={{
-            gridTemplateColumns: `repeat(${grid.width}, minmax(0, 1fr))`,
+            width: "100%",
+            height: "100%",
+            gridTemplateColumns: "repeat(21, 1fr)",
+            gridTemplateRows: "repeat(21, 1fr)",
           }}
         >
-          {flattenedCells.map((status, index) => (
-            <div key={`${index}-${status}`} className={cellClass(status)} />
-          ))}
+          {flattenedCells.map((status, index) => {
+            const x = index % grid.width;
+            const y = Math.floor(index / grid.width);
+            return (
+              <div
+                key={`${index}-${status}`}
+                className={cellClass(status, x, y)}
+              />
+            );
+          })}
         </div>
 
         {drones.map((drone) => {
