@@ -23,13 +23,13 @@ type DroneTelemetry = {
 const BACKEND_BASE_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
-const COMMAND_AGENT_BASE = { x: 10, y: 10 };
+const COMMAND_AGENT_BASE = { x: 20, y: 20 };
 
 const defaultGrid = {
-  width: 21,
-  height: 21,
-  cell_status: Array.from({ length: 21 }, () =>
-    Array.from({ length: 21 }, () => "unvisited")
+  width: 40,
+  height: 40,
+  cell_status: Array.from({ length: 40 }, () =>
+    Array.from({ length: 40 }, () => "unvisited")
   ),
 };
 
@@ -119,8 +119,8 @@ export default function GridMap({ missionStarted }: GridMapProps) {
           style={{
             width: "100%",
             height: "100%",
-            gridTemplateColumns: "repeat(21, 1fr)",
-            gridTemplateRows: "repeat(21, 1fr)",
+            gridTemplateColumns: `repeat(${grid.width}, 1fr)`,
+            gridTemplateRows: `repeat(${grid.height}, 1fr)`,
           }}
         >
           {flattenedCells.map((status, index) => {

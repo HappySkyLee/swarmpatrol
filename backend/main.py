@@ -52,7 +52,7 @@ app.add_middleware(
 
 
 # Shared backend objects.
-model = Model(num_drones=3)
+model = Model(num_drones=4)
 orchestrator = None
 if CommandAgentOrchestrator is not None:
     try:
@@ -60,9 +60,41 @@ if CommandAgentOrchestrator is not None:
     except BaseException as exc:
         ORCHESTRATOR_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 simulation_lock = threading.Lock()
+mission_control_lock = threading.Lock()
+mission_stop_event = threading.Event()
 stop_simulation_event = threading.Event()
 simulation_thread: threading.Thread | None = None
 SIMULATION_STEP_SECONDS = float(os.getenv("SIMULATION_STEP_SECONDS", "3"))
+
+
+def _create_orchestrator_or_capture_error() -> tuple[Any, str | None]:
+    if CommandAgentOrchestrator is None:
+        return None, ORCHESTRATOR_IMPORT_ERROR
+
+    try:
+        return CommandAgentOrchestrator(server_script="mcp_server.py"), None
+    except BaseException as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _reset_mission_state() -> None:
+    """Reset model and orchestrator so a mission can restart from clean state."""
+    global model
+    global orchestrator
+    global ORCHESTRATOR_IMPORT_ERROR
+
+    with mission_control_lock:
+        mission_stop_event.set()
+
+    with simulation_lock:
+        model = Model(num_drones=4)
+
+    new_orchestrator, orchestrator_error = _create_orchestrator_or_capture_error()
+    orchestrator = new_orchestrator
+    ORCHESTRATOR_IMPORT_ERROR = orchestrator_error
+
+    with mission_control_lock:
+        mission_stop_event.clear()
 
 
 def _require_orchestrator() -> Any:
@@ -95,6 +127,9 @@ def _startup_simulation_controller() -> None:
 
 @app.on_event("shutdown")
 def _shutdown_simulation_controller() -> None:
+    with mission_control_lock:
+        mission_stop_event.set()
+
     stop_simulation_event.set()
     if simulation_thread and simulation_thread.is_alive():
         simulation_thread.join(timeout=1.0)
@@ -128,15 +163,39 @@ def start_mission() -> dict[str, object]:
     """Start high-level mission planning for the command agent."""
     active_orchestrator = _require_orchestrator()
     planning_prompt = (
-        "Start high-level mission planning from base (10,10). "
+        "Start high-level mission planning from base (20,20). "
         "Discover active drones and produce the initial search-and-rescue plan."
     )
     planning_result = active_orchestrator.invoke(planning_prompt)
 
     return {
-        "message": "Command Agent at (10,10) has initiated the search-and-rescue operation.",
+        "message": "Command Agent at (20,20) has initiated the search-and-rescue operation.",
         "mission_started": True,
         "agent_output": planning_result.get("output", ""),
+    }
+
+
+@app.post("/stop_mission")
+def stop_mission() -> dict[str, object]:
+    """Signal all active mission streams to stop gracefully."""
+    with mission_control_lock:
+        mission_stop_event.set()
+
+    return {
+        "mission_stopped": True,
+        "message": "Stop signal sent to mission streams.",
+    }
+
+
+@app.post("/restart_mission")
+def restart_mission() -> dict[str, object]:
+    """Stop active mission streams and reset model/orchestrator state."""
+    _reset_mission_state()
+    return {
+        "mission_restarted": True,
+        "message": "Mission state reset completed.",
+        "orchestrator_ready": orchestrator is not None,
+        "orchestrator_error": ORCHESTRATOR_IMPORT_ERROR,
     }
 
 
@@ -198,19 +257,38 @@ def _format_sse(event: str, data: dict[str, object]) -> str:
 
 @app.get("/mission_log")
 def mission_log(
-    objective: str = "Start high-level mission planning from base (10,10).",
+    objective: str = "Start high-level mission planning from base (20,20).",
 ) -> StreamingResponse:
     """Stream mission reasoning/events via Server-Sent Events (SSE)."""
     active_orchestrator = _require_orchestrator()
 
     def event_stream():
+        with mission_control_lock:
+            mission_stop_event.clear()
+
         yield _format_sse("status", {"message": "mission_log stream started"})
-        for event in active_orchestrator.stream_mission_events(objective):
-            event_name = str(event.get("event", "message"))
-            event_data = event.get("data", {})
-            if not isinstance(event_data, dict):
-                event_data = {"message": str(event_data)}
-            yield _format_sse(event_name, event_data)
+        try:
+            for event in active_orchestrator.stream_mission_events(
+                objective,
+                should_stop=mission_stop_event.is_set,
+            ):
+                event_name = str(event.get("event", "message"))
+                event_data = event.get("data", {})
+                if not isinstance(event_data, dict):
+                    event_data = {"message": str(event_data)}
+                yield _format_sse(event_name, event_data)
+
+                if mission_stop_event.is_set():
+                    break
+        except BaseException as exc:
+            yield _format_sse(
+                "mission_error",
+                {
+                    "message": "mission_log stream failed",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                },
+            )
+
         yield _format_sse("status", {"message": "mission_log stream completed"})
 
     return StreamingResponse(

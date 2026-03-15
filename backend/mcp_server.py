@@ -11,7 +11,7 @@ from engine import COMMAND_AGENT_ORIGIN, Drone, SwarmModel as Model
 mcp = FastMCP("swarm-intelligence")
 
 # Active simulation instance shared by MCP tools.
-_active_model: Model = Model(num_drones=3)
+_active_model: Model = Model(num_drones=4)
 _verified_survivors: set[tuple[int, int]] = set()
 
 
@@ -49,10 +49,9 @@ def list_active_drones() -> list[dict[str, Any]]:
         if drone.state != "active":
             continue
 
-        unique_id = getattr(drone, "unique_id", index)
         active.append(
             {
-                "id": int(unique_id),
+                "id": int(index),
                 "status": drone.state,
                 "position": [drone.x, drone.y],
                 "battery": drone.battery,
@@ -180,7 +179,7 @@ def verify_survivor(drone_id: int) -> dict[str, Any]:
 
 @mcp.tool()
 def plan_human_rescue_route(x: int, y: int) -> dict[str, Any]:
-    """Plan A* rescue-team route from base (10,10) to a verified survivor."""
+    """Plan A* rescue-team route from base (20,20) to a verified survivor."""
     model = get_active_model()
     width = model.search_grid.shape[1]
     height = model.search_grid.shape[0]

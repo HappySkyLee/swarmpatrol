@@ -5,7 +5,7 @@ import os
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 try:
     from langchain.agents import AgentExecutor, create_tool_calling_agent
@@ -26,7 +26,7 @@ SYSTEM_PROMPT = (
     "and decide whether to dispatch a second drone for multimodal verification or continue sweep. "
     "Only use verify_survivor after this triage decision is justified. "
     "When a survivor is verified, transition to Human Rescue Routing: call plan_human_rescue_route "
-    "to compute an A* path from base (10,10) to the verified location."
+    "to compute an A* path from base (20,20) to the verified location."
 )
 
 
@@ -165,7 +165,7 @@ HUMAN_RESCUE_ROUTING_POLICY = (
     "Human Rescue Routing policy:\n"
     "1) If verify_survivor returns Confirmed Survivor, do not end the turn immediately.\n"
     "2) Call plan_human_rescue_route(x, y) for the confirmed location in the same decision cycle.\n"
-    "3) Ensure the route is A*-based and originates from base (10,10).\n"
+    "3) Ensure the route is A*-based and originates from base (20,20).\n"
     "4) Report route readiness, path cost, and handoff instructions for human rescue teams."
 )
 
@@ -303,7 +303,11 @@ class CommandAgentOrchestrator:
         }
         return result
 
-    def stream_mission_events(self, user_input: str):
+    def stream_mission_events(
+        self,
+        user_input: str,
+        should_stop: Callable[[], bool] | None = None,
+    ):
         """Yield mission events suitable for SSE transport.
 
         The stream emits THOUGHT-style summaries tied to tool actions and
@@ -321,6 +325,15 @@ class CommandAgentOrchestrator:
         final_output = ""
 
         for chunk in self.executor.iter(payload):
+            if should_stop and should_stop():
+                yield {
+                    "event": "status",
+                    "data": {
+                        "message": "mission stopped by operator",
+                    },
+                }
+                return
+
             if not isinstance(chunk, dict):
                 continue
 

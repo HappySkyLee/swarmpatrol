@@ -25,6 +25,8 @@ type HealthResponse = {
 export default function Home() {
   const [missionStarted, setMissionStarted] = useState(false);
   const [missionLoading, setMissionLoading] = useState(false);
+  const [missionStopping, setMissionStopping] = useState(false);
+  const [missionRestarting, setMissionRestarting] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -37,8 +39,15 @@ export default function Home() {
 
   const statusLabel = useMemo(() => {
     if (missionLoading) return "Connecting...";
+    if (missionRestarting) return "Restarting...";
+    if (missionStopping) return "Stopping...";
     return missionStarted ? "Mission active" : "Mission idle";
-  }, [missionLoading, missionStarted]);
+  }, [missionLoading, missionRestarting, missionStarted, missionStopping]);
+
+  const closeMissionStream = () => {
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+  };
 
   const fetchTelemetry = async (logErrors = false) => {
     try {
@@ -96,8 +105,13 @@ export default function Home() {
     }
   };
 
-  const startMission = async () => {
-    if (missionLoading || missionStarted) return;
+  const startMission = async (options?: { force?: boolean }) => {
+    const forceStart = options?.force ?? false;
+    if (missionLoading || missionStopping || missionRestarting || (missionStarted && !forceStart)) {
+      return;
+    }
+
+    closeMissionStream();
     setMissionLoading(true);
 
     const addLog = (line: string) =>
@@ -150,9 +164,23 @@ export default function Home() {
         const data = JSON.parse(e.data as string) as { output?: string };
         addLog(`[result] ${data.output ?? "Mission complete."}`);
       } catch { addLog("[result] Mission complete."); }
-      es.close();
-      eventSourceRef.current = null;
+      closeMissionStream();
+      setMissionStarted(false);
       void fetchTelemetry(true);
+    });
+
+    es.addEventListener("mission_error", (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data as string) as { message?: string; detail?: string };
+        const detail = data.detail ? ` ${data.detail}` : "";
+        addLog(`[error] ${data.message ?? "Mission stream failed."}${detail}`);
+      } catch {
+        addLog("[error] Mission stream failed.");
+      }
+
+      setMissionLoading(false);
+      setMissionStarted(false);
+      closeMissionStream();
     });
 
     es.onerror = () => {
@@ -165,9 +193,71 @@ export default function Home() {
       } else {
         addLog("[status] Mission stream closed.");
       }
-      es.close();
-      eventSourceRef.current = null;
+      closeMissionStream();
     };
+  };
+
+  const stopMission = async (options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+    if (missionStopping || missionRestarting) {
+      return;
+    }
+
+    setMissionStopping(true);
+    const addLog = (line: string) =>
+      setLogs((prev) => [line, ...prev].slice(0, 100));
+
+    try {
+      const response = await fetch(`${BACKEND_BASE_URL}/stop_mission`, {
+        method: "POST",
+      });
+      if (!response.ok && !silent) {
+        addLog(`[error] Stop mission request failed (${response.status}).`);
+      }
+    } catch {
+      if (!silent) {
+        addLog("[error] Cannot reach backend stop_mission endpoint.");
+      }
+    } finally {
+      closeMissionStream();
+      setMissionLoading(false);
+      setMissionStarted(false);
+      if (!silent) {
+        addLog("[status] Mission stop requested.");
+      }
+      setMissionStopping(false);
+      void fetchTelemetry(true);
+    }
+  };
+
+  const restartMission = async () => {
+    if (missionLoading || missionStopping || missionRestarting) {
+      return;
+    }
+
+    setMissionRestarting(true);
+    const addLog = (line: string) =>
+      setLogs((prev) => [line, ...prev].slice(0, 100));
+
+    await stopMission({ silent: true });
+
+    try {
+      const response = await fetch(`${BACKEND_BASE_URL}/restart_mission`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        addLog(`[error] Restart mission request failed (${response.status}).`);
+        return;
+      }
+
+      setLogs(["[status] Mission state reset complete. Starting new mission stream..."]);
+      await startMission({ force: true });
+    } catch {
+      addLog("[error] Cannot reach backend restart_mission endpoint.");
+    } finally {
+      setMissionRestarting(false);
+    }
   };
 
   return (
@@ -175,7 +265,7 @@ export default function Home() {
       <div className="mx-auto flex w-full max-w-[1400px] items-center justify-between pb-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 md:text-3xl">Swarm Mission Dashboard</h1>
-          <p className="text-sm text-slate-600">Command Agent Base: (10,10)</p>
+          <p className="text-sm text-slate-600">Command Agent Base: (20,20)</p>
         </div>
 
         <div className="flex items-center gap-3">
@@ -185,10 +275,30 @@ export default function Home() {
             onClick={() => {
               void startMission();
             }}
-            disabled={missionLoading || missionStarted}
+            disabled={missionLoading || missionStarted || missionStopping || missionRestarting}
             className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {missionLoading ? "Connecting..." : missionStarted ? "Mission Active" : "Start Mission"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void stopMission();
+            }}
+            disabled={missionStopping || missionRestarting || (!missionStarted && !missionLoading)}
+            className="rounded-xl bg-rose-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-600 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {missionStopping ? "Stopping..." : "Stop Mission"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void restartMission();
+            }}
+            disabled={missionLoading || missionStopping || missionRestarting}
+            className="rounded-xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {missionRestarting ? "Restarting..." : "Restart Mission"}
           </button>
         </div>
       </div>
