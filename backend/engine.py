@@ -9,7 +9,7 @@ GRID_HEIGHT = 40
 ZONE_SIZE = 20
 COMMAND_AGENT_ORIGIN = (20, 20)
 RECHARGE_RATE_PER_ROUND = 25
-BATTERY_RETURN_BUFFER = 3
+BATTERY_RETURN_BUFFER = 10
 
 ZoneBounds = tuple[int, int, int, int]
 
@@ -44,7 +44,12 @@ class Drone(Agent):
         self.target: tuple[int, int] | None = None
         self.last_scan_result: str | None = None
 
-    def move_to(self, new_position: tuple[int, int]) -> tuple[int, int]:
+    def move_to(
+        self,
+        new_position: tuple[int, int],
+        constrain_to_assigned_zone: bool = True,
+        avoid_suspect: bool = True,
+    ) -> tuple[int, int]:
         """Move one A*-planned step toward new_position and consume 1% battery."""
         if self.state == "failed":
             return self.x, self.y
@@ -53,15 +58,18 @@ class Drone(Agent):
         try:
             # Drones spawn at the global origin. While outside assigned zone,
             # allow transit pathing so they can enter their sector first.
-            use_zone_bounds = (
-                self.assigned_zone
-                if _in_zone((self.x, self.y), self.assigned_zone)
-                else None
-            )
+            use_zone_bounds = None
+            if constrain_to_assigned_zone:
+                use_zone_bounds = (
+                    self.assigned_zone
+                    if _in_zone((self.x, self.y), self.assigned_zone)
+                    else None
+                )
             path, _ = self.model.find_path(
                 (self.x, self.y),
                 new_position,
                 zone_bounds=use_zone_bounds,
+                avoid_suspect=avoid_suspect,
             )
             if len(path) > 1:
                 next_x, next_y = path[1]
@@ -231,7 +239,11 @@ class SwarmModel(MesaModel):
                         drone.target = None
                     continue
 
-                drone.move_to(COMMAND_AGENT_ORIGIN)
+                drone.move_to(
+                    COMMAND_AGENT_ORIGIN,
+                    constrain_to_assigned_zone=False,
+                    avoid_suspect=False,
+                )
                 if (drone.x, drone.y) == COMMAND_AGENT_ORIGIN:
                     drone.mode = "recharging"
                 continue

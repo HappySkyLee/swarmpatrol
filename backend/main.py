@@ -64,7 +64,7 @@ mission_control_lock = threading.Lock()
 mission_stop_event = threading.Event()
 stop_simulation_event = threading.Event()
 simulation_thread: threading.Thread | None = None
-SIMULATION_STEP_SECONDS = float(os.getenv("SIMULATION_STEP_SECONDS", "3"))
+SIMULATION_STEP_SECONDS = float(os.getenv("SIMULATION_STEP_SECONDS", "0.3"))
 
 
 def _create_orchestrator_or_capture_error() -> tuple[Any, str | None]:
