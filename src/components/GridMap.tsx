@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type GridMapProps = {
   missionStarted: boolean;
@@ -36,6 +36,9 @@ const defaultGrid = {
 export default function GridMap({ missionStarted }: GridMapProps) {
   const [grid, setGrid] = useState<GridStateResponse>(defaultGrid);
   const [drones, setDrones] = useState<DroneTelemetry[]>([]);
+  const [hoveredCell, setHoveredCell] = useState<{ x: number; y: number } | null>(null);
+  const [hoverTooltipPosition, setHoverTooltipPosition] = useState<{ x: number; y: number } | null>(null);
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
 
   const flattenedCells = useMemo(() => {
     const cells: string[] = [];
@@ -98,6 +101,36 @@ export default function GridMap({ missionStarted }: GridMapProps) {
     return "bg-slate-300";
   };
 
+  const updateHoverTooltipPosition = (clientX: number, clientY: number) => {
+    if (!mapContainerRef.current) {
+      return;
+    }
+
+    const rect = mapContainerRef.current.getBoundingClientRect();
+    const TOOLTIP_W = 80;
+    const TOOLTIP_H = 28;
+    const OFFSET = 10;
+
+    const relX = clientX - rect.left;
+    const relY = clientY - rect.top;
+
+    // Default: bottom-right of cursor
+    let tx = relX + OFFSET;
+    let ty = relY + OFFSET;
+
+    // Flip to left when close to right edge
+    if (tx + TOOLTIP_W > rect.width) {
+      tx = relX - TOOLTIP_W - OFFSET;
+    }
+
+    // Flip to above when close to bottom edge
+    if (ty + TOOLTIP_H > rect.height) {
+      ty = relY - TOOLTIP_H - OFFSET;
+    }
+
+    setHoverTooltipPosition({ x: tx, y: ty });
+  };
+
   return (
     <section className="h-full rounded-2xl border border-slate-200 bg-white/70 p-5 shadow-sm backdrop-blur">
       <div className="mb-4 flex items-center justify-between">
@@ -113,9 +146,16 @@ export default function GridMap({ missionStarted }: GridMapProps) {
         </span>
       </div>
 
-      <div className="relative h-[calc(100%-3rem)] overflow-hidden rounded-xl border border-slate-200 bg-slate-100 p-2">
+      <div
+        ref={mapContainerRef}
+        className="relative h-[calc(100%-3rem)] overflow-hidden rounded-xl border border-slate-200 bg-slate-100 p-2"
+      >
         <div
           className="grid h-full w-full gap-[1px]"
+          onMouseLeave={() => {
+            setHoveredCell(null);
+            setHoverTooltipPosition(null);
+          }}
           style={{
             width: "100%",
             height: "100%",
@@ -130,10 +170,30 @@ export default function GridMap({ missionStarted }: GridMapProps) {
               <div
                 key={`${index}-${status}`}
                 className={cellClass(status, x, y)}
+                onMouseEnter={(event) => {
+                  setHoveredCell({ x, y });
+                  updateHoverTooltipPosition(event.clientX, event.clientY);
+                }}
+                onMouseMove={(event) => {
+                  setHoveredCell({ x, y });
+                  updateHoverTooltipPosition(event.clientX, event.clientY);
+                }}
               />
             );
           })}
         </div>
+
+        {hoveredCell && hoverTooltipPosition ? (
+          <div
+            className="pointer-events-none absolute z-20 rounded-md border border-slate-200 bg-white/95 px-2 py-1 text-xs font-medium text-slate-800 shadow-sm"
+            style={{
+              left: `${hoverTooltipPosition.x}px`,
+              top: `${hoverTooltipPosition.y}px`,
+            }}
+          >
+            ({hoveredCell.x}, {hoveredCell.y})
+          </div>
+        ) : null}
 
         {drones.map((drone) => {
           const left = (drone.x / Math.max(grid.width - 1, 1)) * 100;
