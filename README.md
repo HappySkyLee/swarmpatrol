@@ -5,7 +5,7 @@
 ![Preview](Snapshots/Preview1)
 
 ## __Feature/Function__  
-# •	**The Map:**   
+### •	**The Map:**   
 The search area is represented as a 21 x 21 grid cell.
 
 ### •	**The Actors:**  
