@@ -2,7 +2,7 @@
 ### This case study is under the Agentic AI (Decentralised Swarm Intelligence) track. It aligns with Sustainable Development Goals 9 (Industry, Innovation, and Infrastructure) and 3 (Good Health and Well-being).
 
 ## Preview
-![Preview](Snapshots/Preview1)
+![Preview](Snapshots/Preview1.png)
 
 ## __Feature/Function__  
 ### •	**The Map:**   
@@ -39,7 +39,7 @@ Once a survivor is confirmed, the AI analyzes the grid to plot a safe, optimal r
 •	FastAPI  
 •	LangChain  
 
-![Preview](Snapshots/Tech)
+![Preview](Snapshots/Tech.png)
 
 ## __Future Roadmap:__
 •	**Risk Management:** The system accounts for "rescue priority" triage and handles edge cases like drone hardware failures. 
