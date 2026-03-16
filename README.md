@@ -1,36 +1,49 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Swarm Patrol 
+### This case study is under the Agentic AI (Decentralised Swarm Intelligence) track. It aligns with Sustainable Development Goals 9 (Industry, Innovation, and Infrastructure) and 3 (Good Health and Well-being).
 
-## Getting Started
+## Preview
+![Preview](Snapshots/Preview1)
 
-First, run the development server:
+## __Feature/Function__  
+### •	**The Map:**   
+The search area is represented as a 21 x 21 grid cell.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+### •	**The Actors:**  
+A "Command Agent" powered by an LLM sits at the origin (10,10). It deploys a fleet of drones (minimum of 3) based on the size of the grid.  
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### •	**Time Mechanics:**   
+The simulation or real-world logic operates in turns, proposing "1 minutes as one round". In each round, each drone can move one step and perform thermal scan.  
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### •	**Battery Drain:**   
+Moving one step or 1 minute consumes 1% of a drone's battery. Charging a drone takes 30 minutes.  
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### •	**Exploration Logic:**  
+As drones move, they mark grid cells as "unvisited," "clear," or "suspect." The notes explicitly mention using a A* algorithm to handle this grid traversal.  
 
-## Learn More
+### •	**Swarm Intelligence:**   
+Drones utilize "shared memory." When one drone maps an area or finds an obstacle, other drones instantly update their own pathfinding logic based on that shared data.  
 
-To learn more about Next.js, take a look at the following resources:
+### •	**Survivor Verification:**   
+To avoid false alarms, the drone uses multimodal inputs (temperature, sound, shape) to autonomously determine if it has actually found a survivor. Might have a chance of being a false alarm  
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### •	**Routing for Humans:**  
+Once a survivor is confirmed, the AI analyzes the grid to plot a safe, optimal route for human rescue teams to follow with using the A* algorithm.  
+ 
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## __Tech Stack:__    
+•	Next.js   
+•	Mesa  
+•	NumPy & Pandas  
+•	NetworkX  
+•	FastMCP  
+•	FastAPI  
+•	LangChain  
 
-## Deploy on Vercel
+![Preview](Snapshots/Tech)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## __Future Roadmap:__
+•	**Risk Management:** The system accounts for "rescue priority" triage and handles edge cases like drone hardware failures. 
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+•	**Dynamic Routing:** The system introduces random environmental hazards like strong winds or bird flocks. The onboard LLM allows the drone to autonomously recalculate and change its route to avoid these.  
+
+•	**Signal Attenuation:** Every grid space away from the Command Agent causes a 5% drop in signal strength. Drones must switch modes to act as "signal extensions" (relays) for each other to reach further into the grid
