@@ -3,7 +3,7 @@ uvicorn
 fastmcp
 langchain
 langchain-core
-langchain-openai
+langchain-google-genai
 langchain-classic
 langchain-mcp-adapters
 mesa

@@ -6,6 +6,7 @@ import sys
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from dotenv import dotenv_values, load_dotenv
 
 try:
     from langchain.agents import AgentExecutor, create_tool_calling_agent
@@ -13,7 +14,32 @@ except Exception:
     from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+BACKEND_DIR = os.path.dirname(__file__)
+PROJECT_ROOT_DIR = os.path.dirname(BACKEND_DIR)
+BACKEND_ENV_PATH = os.path.join(BACKEND_DIR, ".env")
+PROJECT_ROOT_ENV_PATH = os.path.join(PROJECT_ROOT_DIR, ".env")
+
+load_dotenv(dotenv_path=BACKEND_ENV_PATH)
+load_dotenv(dotenv_path=PROJECT_ROOT_ENV_PATH)
+
+
+def _resolve_gemini_api_key() -> str | None:
+    """Resolve Gemini API key from process env or dotenv files."""
+    key_from_env = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if key_from_env:
+        return key_from_env
+
+    for env_path in (BACKEND_ENV_PATH, PROJECT_ROOT_ENV_PATH):
+        if not os.path.exists(env_path):
+            continue
+        values = dotenv_values(env_path)
+        key_from_file = values.get("GOOGLE_API_KEY") or values.get("GEMINI_API_KEY")
+        if isinstance(key_from_file, str) and key_from_file.strip():
+            return key_from_file.strip()
+
+    return None
 
 
 SYSTEM_PROMPT = (
@@ -215,17 +241,24 @@ def _run_coroutine_sync(coro: Any) -> Any:
     return result.get("value")
 
 
-def _build_llm() -> ChatOpenAI:
+def _build_llm() -> ChatGoogleGenerativeAI:
     """Initialize an LLM backend for the tool-calling agent.
 
-    Default model is GPT-4o and can be overridden with AGENT_MODEL.
+    Default model is Gemini and can be overridden with AGENT_MODEL.
     """
-    model_name = os.getenv("AGENT_MODEL", "gpt-4o")
+    model_name = os.getenv("AGENT_MODEL", "gemini-2.0-flash")
     temperature = float(os.getenv("AGENT_TEMPERATURE", "0"))
-    return ChatOpenAI(
+    api_key = _resolve_gemini_api_key()
+    if not api_key:
+        raise ValueError(
+            "Gemini API key not found. Set GOOGLE_API_KEY or GEMINI_API_KEY in environment, "
+            f"{BACKEND_ENV_PATH}, or {PROJECT_ROOT_ENV_PATH}."
+        )
+
+    return ChatGoogleGenerativeAI(
         model=model_name,
         temperature=temperature,
-        model_kwargs={"parallel_tool_calls": True},
+        api_key=api_key,
     )
 
 

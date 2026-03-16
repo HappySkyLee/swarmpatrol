@@ -6,6 +6,8 @@ import BatteryDashboard from "../components/BatteryDashboard";
 import GridMap from "../components/GridMap";
 import MissionLog from "../components/MissionLog";
 
+type MissionMode = "ai" | "fallback" | null;
+
 type Telemetry = {
   drone_id: number;
   x: number;
@@ -29,6 +31,7 @@ export default function Home() {
   const [missionRestarting, setMissionRestarting] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
+  const [missionMode, setMissionMode] = useState<MissionMode>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -76,7 +79,11 @@ export default function Home() {
     };
   }, []);
 
-  const checkMissionReadiness = async (): Promise<{ ok: boolean; reason?: string }> => {
+  const checkMissionReadiness = async (): Promise<{
+    ok: boolean;
+    reason?: string;
+    warning?: string;
+  }> => {
     try {
       const response = await fetch(`${BACKEND_BASE_URL}/health`);
       if (!response.ok) {
@@ -89,10 +96,10 @@ export default function Home() {
       const health = (await response.json()) as HealthResponse;
       if (health.orchestrator_ready === false) {
         return {
-          ok: false,
-          reason:
+          ok: true,
+          warning:
             health.orchestrator_error ??
-            "Mission orchestrator is unavailable. Ensure backend dependencies and OPENAI_API_KEY are configured.",
+            "Mission orchestrator is unavailable. Running simulation-only fallback mode.",
         };
       }
 
@@ -125,6 +132,10 @@ export default function Home() {
       return;
     }
 
+    if (readiness.warning) {
+      addLog(`[status] ${readiness.warning}`);
+    }
+
     let connected = false;
     const es = new EventSource(`${BACKEND_BASE_URL}/mission_log`);
     eventSourceRef.current = es;
@@ -133,15 +144,25 @@ export default function Home() {
       connected = true;
       setMissionStarted(true);
       setMissionLoading(false);
+      setMissionMode("ai");
       addLog("[system] Mission stream connected.");
       void fetchTelemetry(true);
     };
 
     es.addEventListener("status", (e: MessageEvent) => {
       try {
-        const data = JSON.parse(e.data as string) as { message?: string };
+        const data = JSON.parse(e.data as string) as { message?: string; detail?: string };
+        const message = data.message ?? (e.data as string);
+        if (message.toLowerCase().includes("fallback")) {
+          setMissionMode("fallback");
+        }
         addLog(`[status] ${data.message ?? e.data}`);
-      } catch { addLog(`[status] ${e.data as string}`); }
+        if (data.detail) {
+          addLog(`[status] detail: ${data.detail}`);
+        }
+      } catch {
+        addLog(`[status] ${e.data as string}`);
+      }
     });
 
     es.addEventListener("thought", (e: MessageEvent) => {
@@ -166,6 +187,7 @@ export default function Home() {
       } catch { addLog("[result] Mission complete."); }
       closeMissionStream();
       setMissionStarted(false);
+      setMissionMode(null);
       void fetchTelemetry(true);
     });
 
@@ -180,6 +202,7 @@ export default function Home() {
 
       setMissionLoading(false);
       setMissionStarted(false);
+      setMissionMode(null);
       closeMissionStream();
     });
 
@@ -190,6 +213,7 @@ export default function Home() {
         );
         setMissionLoading(false);
         setMissionStarted(false);
+        setMissionMode(null);
       } else {
         addLog("[status] Mission stream closed.");
       }
@@ -222,6 +246,7 @@ export default function Home() {
       closeMissionStream();
       setMissionLoading(false);
       setMissionStarted(false);
+      setMissionMode(null);
       if (!silent) {
         addLog("[status] Mission stop requested.");
       }
@@ -261,7 +286,7 @@ export default function Home() {
   };
 
   return (
-    <main className="h-screen overflow-hidden bg-gradient-to-br from-slate-100 via-sky-50 to-cyan-100 p-3 md:p-4">
+    <main className="min-h-screen overflow-y-auto bg-gradient-to-br from-slate-100 via-sky-50 to-cyan-100 p-3 md:p-4">
       <div className="mx-auto flex w-full max-w-[1400px] items-center justify-between pb-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 md:text-3xl">Swarm Mission Dashboard</h1>
@@ -269,7 +294,10 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-3">
-          <span className="text-sm font-medium text-slate-700">{statusLabel}</span>
+          <span className="text-sm font-medium text-slate-700">
+            {statusLabel}
+            {missionMode === "fallback" ? " • Fallback Mode" : ""}
+          </span>
           <button
             type="button"
             onClick={() => {
@@ -310,7 +338,7 @@ export default function Home() {
 
         <div className="grid min-h-0 gap-3 lg:col-span-2 lg:grid-rows-2">
           <div className="min-h-0">
-            <MissionLog logs={logs} />
+            <MissionLog logs={logs} mode={missionMode} />
           </div>
           <div className="min-h-0">
             <BatteryDashboard drones={telemetry} />

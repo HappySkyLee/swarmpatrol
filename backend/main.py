@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 
 from typing import Any
 
@@ -12,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 
-# Load .env file so OPENAI_API_KEY and other secrets are available before AI init.
+# Load .env file so GOOGLE_API_KEY and other secrets are available before AI init.
 load_dotenv()
 
 from engine import CELL_SIZE_METERS, SwarmModel as Model
@@ -255,18 +256,96 @@ def _format_sse(event: str, data: dict[str, object]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _simulation_snapshot() -> dict[str, object]:
+    """Collect a compact simulation snapshot for fallback mission streaming."""
+    with simulation_lock:
+        telemetry = [
+            {
+                "drone_id": int(getattr(drone, "unique_id", index)),
+                "x": int(drone.x),
+                "y": int(drone.y),
+                "battery_percentage": int(drone.battery),
+                "mode": str(drone.mode),
+            }
+            for index, drone in enumerate(model.drones)
+        ]
+        return {
+            "round": int(model.round_count),
+            "elapsed_minutes": int(model.elapsed_minutes),
+            "scanned_cells": int(len(model.shared_memory)),
+            "telemetry": telemetry,
+        }
+
+
 @app.get("/mission_log")
 def mission_log(
     objective: str = "Start high-level mission planning from base (20,20).",
 ) -> StreamingResponse:
     """Stream mission reasoning/events via Server-Sent Events (SSE)."""
-    active_orchestrator = _require_orchestrator()
+    active_orchestrator = orchestrator
 
     def event_stream():
         with mission_control_lock:
             mission_stop_event.clear()
 
         yield _format_sse("status", {"message": "mission_log stream started"})
+
+        if active_orchestrator is None:
+            reason = ORCHESTRATOR_IMPORT_ERROR or "orchestrator unavailable"
+            yield _format_sse(
+                "status",
+                {
+                    "message": "orchestrator unavailable; running simulation-only fallback stream",
+                    "detail": reason,
+                },
+            )
+
+            max_updates = int(os.getenv("MISSION_FALLBACK_UPDATES", "6"))
+            for update_index in range(max_updates):
+                if mission_stop_event.is_set():
+                    yield _format_sse("status", {"message": "mission stopped by operator"})
+                    break
+
+                snapshot = _simulation_snapshot()
+                yield _format_sse(
+                    "thought",
+                    {
+                        "label": "THOUGHT",
+                        "message": (
+                            "Fallback mode active: AI orchestrator unavailable; "
+                            "streaming simulation telemetry and map progress."
+                        ),
+                    },
+                )
+                yield _format_sse(
+                    "observation",
+                    {
+                        "tool": "simulation_snapshot",
+                        "observation": snapshot,
+                    },
+                )
+
+                if update_index < max_updates - 1:
+                    time.sleep(SIMULATION_STEP_SECONDS)
+
+            final_snapshot = _simulation_snapshot()
+            yield _format_sse(
+                "final",
+                {
+                    "output": (
+                        "Fallback mission stream complete. Drones continue autonomous exploration "
+                        "without LLM orchestration."
+                    ),
+                    "shared_memory": {
+                        "scanned_cells": final_snapshot.get("scanned_cells", 0),
+                        "round": final_snapshot.get("round", 0),
+                        "elapsed_minutes": final_snapshot.get("elapsed_minutes", 0),
+                    },
+                },
+            )
+            yield _format_sse("status", {"message": "mission_log stream completed"})
+            return
+
         try:
             for event in active_orchestrator.stream_mission_events(
                 objective,
