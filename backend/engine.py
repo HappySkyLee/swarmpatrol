@@ -9,7 +9,10 @@ GRID_HEIGHT = 40
 ZONE_SIZE = 20
 COMMAND_AGENT_ORIGIN = (20, 20)
 RECHARGE_RATE_PER_ROUND = 25
-BATTERY_RETURN_BUFFER = 10
+MIN_RETURN_RESERVE_BATTERY = 20
+MIN_SURVIVOR_SIGNATURES = 40
+MAX_SURVIVOR_SIGNATURES = 80
+SECONDARY_CONFIRM_PROBABILITY = 0.5
 
 ZoneBounds = tuple[int, int, int, int]
 
@@ -79,15 +82,17 @@ class Drone(Agent):
 
         self.x, self.y = int(next_x), int(next_y)
 
-        # One round elapses per call: deduct exactly 1% battery.
-        self.battery = max(0, self.battery - 1)
-        if self.battery == 0:
-            self.state = "failed"
+        # One round elapses per call: deduct 1% battery, but never drop to 0%.
+        self.battery = max(1, self.battery - 1)
 
         # Publish discovered terrain status to shared model memory.
         if hasattr(self.model, "update_shared_memory") and hasattr(self.model, "search_grid"):
-            cell_weight = int(self.model.search_grid[self.y, self.x])
-            status = "suspect" if cell_weight >= 3 else "clear"
+            existing = self.model.shared_memory.get((self.x, self.y))
+            if existing in {"survivor", "survivor_found", "confirmed"}:
+                status = "survivor"
+            else:
+                cell_weight = int(self.model.search_grid[self.y, self.x])
+                status = "suspect" if cell_weight >= 3 else "clear"
             self.model.update_shared_memory((self.x, self.y), status)
 
         return self.x, self.y
@@ -102,12 +107,14 @@ class Drone(Agent):
 
 search_area = np.ones((GRID_HEIGHT, GRID_WIDTH), dtype=int)
 
-# Randomly assign 10% of cells as heavy smoke (weight 3).
+# Randomly assign survivor-signature cells (weight 3) within 40-80 range.
 rng = np.random.default_rng()
 total_cells = GRID_WIDTH * GRID_HEIGHT
-hazard_cells = int(total_cells * 0.10)
-hazard_indices = rng.choice(total_cells, size=hazard_cells, replace=False)
-search_area.flat[hazard_indices] = 3
+base_index = COMMAND_AGENT_ORIGIN[1] * GRID_WIDTH + COMMAND_AGENT_ORIGIN[0]
+candidate_indices = np.array([idx for idx in range(total_cells) if idx != base_index])
+signature_cells = int(rng.integers(MIN_SURVIVOR_SIGNATURES, MAX_SURVIVOR_SIGNATURES + 1))
+signature_indices = rng.choice(candidate_indices, size=signature_cells, replace=False)
+search_area.flat[signature_indices] = 3
 
 # Keep deployment base clear.
 search_area[COMMAND_AGENT_ORIGIN[1], COMMAND_AGENT_ORIGIN[0]] = 1
@@ -125,6 +132,12 @@ class SwarmModel(MesaModel):
         self.shared_memory: dict[tuple[int, int], str] = {}
         self.round_count = 0
         self.elapsed_minutes = 0
+        self.mission_phase = "searching"
+        self.mission_completed = False
+        self.completed_round: int | None = None
+        self.completed_elapsed_minutes: int | None = None
+        self.pending_secondary_checks: dict[tuple[int, int], int] = {}
+        self.confirmed_survivors: set[tuple[int, int]] = set()
         self.drones: list[Drone] = []
         self.zone_assignments = self._build_zone_assignments()
 
@@ -141,8 +154,8 @@ class SwarmModel(MesaModel):
             self.drones.append(drone)
 
     def update_shared_memory(self, position: tuple[int, int], status: str) -> None:
-        if status not in {"clear", "suspect"}:
-            raise ValueError("status must be 'clear' or 'suspect'")
+        if status not in {"clear", "suspect", "survivor"}:
+            raise ValueError("status must be 'clear', 'suspect', or 'survivor'")
         self.shared_memory[position] = status
 
     def _build_zone_assignments(self) -> list[ZoneBounds]:
@@ -204,13 +217,187 @@ class SwarmModel(MesaModel):
         else:
             drone.target = (drone.x, drone.y)
 
-    def step(self) -> None:
-        """Advance the simulation by 1 round (1 minute)."""
-        self.round_count += 1
-        self.elapsed_minutes += 1
+    def _all_cells_scanned(self) -> bool:
+        height, width = self.search_grid.shape
+        if len(self.shared_memory) < width * height:
+            return False
+
+        # Mission search is complete only after all suspects are double-checked.
+        return all(status != "suspect" for status in self.shared_memory.values())
+
+    def _all_active_drones_at_origin(self) -> bool:
+        active_drones = [drone for drone in self.drones if drone.state == "active"]
+        if not active_drones:
+            return True
+        return all((drone.x, drone.y) == COMMAND_AGENT_ORIGIN for drone in active_drones)
+
+    def _begin_return_to_base(self) -> None:
+        self.mission_phase = "returning_to_base"
+        for drone in self.drones:
+            if drone.state != "active":
+                continue
+            drone.mode = "returning"
+            drone.target = COMMAND_AGENT_ORIGIN
+
+    def _mark_mission_complete(self) -> None:
+        self.mission_phase = "completed"
+        self.mission_completed = True
+        self.completed_round = int(self.round_count)
+        self.completed_elapsed_minutes = int(self.elapsed_minutes)
 
         for drone in self.drones:
             if drone.state != "active":
+                continue
+            drone.mode = "standby"
+            drone.target = COMMAND_AGENT_ORIGIN
+
+    def _nearest_available_second_drone(
+        self,
+        target: tuple[int, int],
+        source_drone_index: int,
+    ) -> int | None:
+        candidates: list[tuple[int, int]] = []
+
+        for index, drone in enumerate(self.drones):
+            if index == source_drone_index:
+                continue
+            if drone.state != "active":
+                continue
+            if drone.mode not in {"exploring"}:
+                continue
+
+            distance = abs(drone.x - target[0]) + abs(drone.y - target[1])
+
+            # Only select a verifier that can verify and still keep return reserve.
+            steps_to_origin_after_verify = abs(target[0] - COMMAND_AGENT_ORIGIN[0]) + abs(
+                target[1] - COMMAND_AGENT_ORIGIN[1]
+            )
+            required_battery = distance + steps_to_origin_after_verify + MIN_RETURN_RESERVE_BATTERY
+            if drone.battery <= required_battery:
+                continue
+
+            candidates.append((distance, index))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
+
+    def _schedule_secondary_verification(
+        self,
+        suspect_position: tuple[int, int],
+        source_drone_index: int,
+    ) -> None:
+        if self.mission_phase != "searching":
+            return
+        if self.shared_memory.get(suspect_position) != "suspect":
+            return
+        if suspect_position in self.pending_secondary_checks:
+            return
+
+        verifier_index = self._nearest_available_second_drone(suspect_position, source_drone_index)
+        if verifier_index is None:
+            return
+
+        verifier = self.drones[verifier_index]
+        verifier.mode = "verifying"
+        verifier.target = suspect_position
+        self.pending_secondary_checks[suspect_position] = verifier_index
+
+    def _resolve_secondary_verification(
+        self,
+        verifier_index: int,
+        position: tuple[int, int],
+    ) -> None:
+        verifier = self.drones[verifier_index]
+
+        if self.shared_memory.get(position) != "suspect":
+            self.pending_secondary_checks.pop(position, None)
+            verifier.mode = "exploring"
+            verifier.target = None
+            return
+
+        is_confirmed = bool(self.random.random() < SECONDARY_CONFIRM_PROBABILITY)
+        if is_confirmed:
+            self.update_shared_memory(position, "survivor")
+            self.confirmed_survivors.add(position)
+        else:
+            self.update_shared_memory(position, "clear")
+
+        self.pending_secondary_checks.pop(position, None)
+        verifier.mode = "exploring"
+        verifier.target = None
+
+    def _schedule_outstanding_secondary_checks(self) -> None:
+        if self.mission_phase != "searching":
+            return
+
+        suspect_positions = [
+            pos for pos, status in self.shared_memory.items() if status == "suspect"
+        ]
+        for suspect_position in suspect_positions:
+            if suspect_position in self.pending_secondary_checks:
+                continue
+            self._schedule_secondary_verification(suspect_position, source_drone_index=-1)
+
+    def step(self) -> None:
+        """Advance the simulation by 1 round (1 minute)."""
+        if self.mission_completed:
+            return
+
+        self.round_count += 1
+        self.elapsed_minutes += 1
+
+        if self.mission_phase == "searching" and self._all_cells_scanned():
+            self._begin_return_to_base()
+
+        self._schedule_outstanding_secondary_checks()
+
+        for drone in self.drones:
+            if drone.state != "active":
+                continue
+
+            if self.mission_phase == "searching" and drone.mode != "recharging":
+                required_to_base = self._steps_to_origin(drone) + MIN_RETURN_RESERVE_BATTERY
+                if drone.battery <= required_to_base:
+                    drone.mode = "returning"
+                    drone.target = COMMAND_AGENT_ORIGIN
+
+            if self.mission_phase == "returning_to_base":
+                if (drone.x, drone.y) == COMMAND_AGENT_ORIGIN:
+                    drone.mode = "standby"
+                    drone.target = COMMAND_AGENT_ORIGIN
+                    continue
+
+                drone.mode = "returning"
+                drone.target = COMMAND_AGENT_ORIGIN
+                drone.move_to(
+                    COMMAND_AGENT_ORIGIN,
+                    constrain_to_assigned_zone=False,
+                    avoid_suspect=False,
+                )
+                if (drone.x, drone.y) == COMMAND_AGENT_ORIGIN:
+                    drone.mode = "standby"
+                    drone.target = COMMAND_AGENT_ORIGIN
+                continue
+
+            if drone.mode == "verifying":
+                if drone.target is None:
+                    drone.mode = "exploring"
+                    continue
+
+                target = (int(drone.target[0]), int(drone.target[1]))
+                if (drone.x, drone.y) != target:
+                    drone.move_to(
+                        target,
+                        constrain_to_assigned_zone=False,
+                        avoid_suspect=False,
+                    )
+
+                if (drone.x, drone.y) == target:
+                    verifier_index = self.drones.index(drone)
+                    self._resolve_secondary_verification(verifier_index, target)
                 continue
 
             if drone.mode == "recharging":
@@ -225,7 +412,7 @@ class SwarmModel(MesaModel):
                     continue
 
             if drone.mode != "returning":
-                required_to_base = self._steps_to_origin(drone) + BATTERY_RETURN_BUFFER
+                required_to_base = self._steps_to_origin(drone) + MIN_RETURN_RESERVE_BATTERY
                 if drone.battery <= required_to_base:
                     drone.mode = "returning"
                     drone.target = COMMAND_AGENT_ORIGIN
@@ -253,6 +440,13 @@ class SwarmModel(MesaModel):
 
             drone.move_to(drone.target)
             drone.thermal_scan()
+            current_position = (drone.x, drone.y)
+            if self.shared_memory.get(current_position) == "suspect":
+                source_index = self.drones.index(drone)
+                self._schedule_secondary_verification(current_position, source_index)
+
+        if self.mission_phase == "returning_to_base" and self._all_active_drones_at_origin():
+            self._mark_mission_complete()
 
     def find_path(
         self,

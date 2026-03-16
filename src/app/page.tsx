@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import BatteryDashboard from "../components/BatteryDashboard";
 import GridMap from "../components/GridMap";
 import MissionLog from "../components/MissionLog";
+import SurvivorDashboard from "../components/SurvivorDashboard";
 
 type Telemetry = {
   drone_id: number;
@@ -14,12 +15,34 @@ type Telemetry = {
   mode: string;
 };
 
+type Survivor = {
+  x: number;
+  y: number;
+  detected_round: number;
+  detected_elapsed_minutes: number;
+  status: "suspect" | "confirmed";
+  route_ready: boolean;
+};
+
+type SurvivorsResponse = {
+  count: number;
+  confirmed_count: number;
+  suspect_count: number;
+  survivors: Survivor[];
+};
+
 const BACKEND_BASE_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
 type HealthResponse = {
   orchestrator_ready?: boolean;
   orchestrator_error?: string | null;
+  simulation_running?: boolean;
+  elapsed_minutes?: number;
+  mission_phase?: string;
+  mission_completed?: boolean;
+  completed_round?: number | null;
+  completed_elapsed_minutes?: number | null;
 };
 
 export default function Home() {
@@ -29,7 +52,14 @@ export default function Home() {
   const [missionRestarting, setMissionRestarting] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
+  const [survivors, setSurvivors] = useState<Survivor[]>([]);
+  const [simulationRunning, setSimulationRunning] = useState(false);
+  const [missionCompleted, setMissionCompleted] = useState(false);
+  const [completedRound, setCompletedRound] = useState<number | null>(null);
+  const [completedMinutes, setCompletedMinutes] = useState<number | null>(null);
+  const [missionElapsedSeconds, setMissionElapsedSeconds] = useState(0);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const missionCompletedLoggedRef = useRef(false);
 
   useEffect(() => {
     return () => {
@@ -41,8 +71,36 @@ export default function Home() {
     if (missionLoading) return "Connecting...";
     if (missionRestarting) return "Restarting...";
     if (missionStopping) return "Stopping...";
+    if (missionCompleted) return "Mission completed";
+    if (simulationRunning) return "Simulation running";
     return missionStarted ? "Mission active" : "Mission idle";
-  }, [missionLoading, missionRestarting, missionStarted, missionStopping]);
+  }, [
+    missionLoading,
+    missionRestarting,
+    missionStarted,
+    missionStopping,
+    simulationRunning,
+    missionCompleted,
+  ]);
+
+  const survivorCounts = useMemo(() => {
+    const suspect = survivors.filter((item) => item.status === "suspect").length;
+    const confirmed = survivors.filter((item) => item.status === "confirmed").length;
+    return { suspect, confirmed, total: survivors.length };
+  }, [survivors]);
+
+  const formattedMissionTimer = useMemo(() => {
+    const total = Math.max(0, Math.floor(missionElapsedSeconds));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    if (hours > 0) {
+      return `${hours.toString().padStart(2, "0")}:${minutes
+        .toString()
+        .padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+    }
+    return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+  }, [missionElapsedSeconds]);
 
   const closeMissionStream = () => {
     eventSourceRef.current?.close();
@@ -65,10 +123,28 @@ export default function Home() {
     }
   };
 
+  const fetchSurvivors = async (logErrors = false) => {
+    try {
+      const response = await fetch(`${BACKEND_BASE_URL}/survivors`);
+      if (!response.ok) {
+        throw new Error(`Survivor request failed (${response.status})`);
+      }
+      const data = (await response.json()) as SurvivorsResponse;
+      setSurvivors(Array.isArray(data.survivors) ? data.survivors : []);
+    } catch (error) {
+      if (logErrors) {
+        const message = error instanceof Error ? error.message : "Survivor fetch failed";
+        setLogs((prev) => [`[error] ${message}`, ...prev]);
+      }
+    }
+  };
+
   useEffect(() => {
     void fetchTelemetry();
+    void fetchSurvivors();
     const timer = window.setInterval(() => {
       void fetchTelemetry();
+      void fetchSurvivors();
     }, 2000);
 
     return () => {
@@ -87,6 +163,22 @@ export default function Home() {
       }
 
       const health = (await response.json()) as HealthResponse;
+      setSimulationRunning(Boolean(health.simulation_running));
+      if (
+        health.mission_phase === "searching" &&
+        typeof health.elapsed_minutes === "number"
+      ) {
+        setMissionElapsedSeconds(Math.max(0, Math.floor(health.elapsed_minutes)) * 60);
+      }
+      setMissionCompleted(Boolean(health.mission_completed));
+      setCompletedRound(
+        typeof health.completed_round === "number" ? health.completed_round : null
+      );
+      setCompletedMinutes(
+        typeof health.completed_elapsed_minutes === "number"
+          ? health.completed_elapsed_minutes
+          : null
+      );
       if (health.orchestrator_ready === false) {
         return {
           ok: false,
@@ -105,6 +197,65 @@ export default function Home() {
     }
   };
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const pollHealth = async () => {
+      try {
+        const response = await fetch(`${BACKEND_BASE_URL}/health`);
+        if (!response.ok) {
+          return;
+        }
+        const health = (await response.json()) as HealthResponse;
+        if (!cancelled) {
+          setSimulationRunning(Boolean(health.simulation_running));
+          if (
+            health.mission_phase === "searching" &&
+            typeof health.elapsed_minutes === "number"
+          ) {
+            setMissionElapsedSeconds(Math.max(0, Math.floor(health.elapsed_minutes)) * 60);
+          }
+          setMissionCompleted(Boolean(health.mission_completed));
+          setCompletedRound(
+            typeof health.completed_round === "number" ? health.completed_round : null
+          );
+          setCompletedMinutes(
+            typeof health.completed_elapsed_minutes === "number"
+              ? health.completed_elapsed_minutes
+              : null
+          );
+        }
+      } catch {
+        // Keep previous health state when backend is temporarily unavailable.
+      }
+    };
+
+    void pollHealth();
+    const timer = window.setInterval(() => {
+      void pollHealth();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!missionCompleted || missionCompletedLoggedRef.current) {
+      return;
+    }
+
+    missionCompletedLoggedRef.current = true;
+    closeMissionStream();
+    setMissionLoading(false);
+    setMissionStarted(false);
+    setSimulationRunning(false);
+    setLogs((prev) => ["[status] Mission complete: all drones returned to base.", ...prev].slice(0, 100));
+    void fetchTelemetry(true);
+    void fetchSurvivors(true);
+  }, [missionCompleted]);
+
   const startMission = async (options?: { force?: boolean }) => {
     const forceStart = options?.force ?? false;
     if (missionLoading || missionStopping || missionRestarting || (missionStarted && !forceStart)) {
@@ -113,6 +264,14 @@ export default function Home() {
 
     closeMissionStream();
     setMissionLoading(true);
+    setMissionElapsedSeconds(0);
+
+    if (missionCompleted) {
+      missionCompletedLoggedRef.current = false;
+      setMissionCompleted(false);
+      setCompletedRound(null);
+      setCompletedMinutes(null);
+    }
 
     const addLog = (line: string) =>
       setLogs((prev) => [line, ...prev].slice(0, 100));
@@ -132,9 +291,11 @@ export default function Home() {
     es.onopen = () => {
       connected = true;
       setMissionStarted(true);
+      setSimulationRunning(true);
       setMissionLoading(false);
       addLog("[system] Mission stream connected.");
       void fetchTelemetry(true);
+      void fetchSurvivors(true);
     };
 
     es.addEventListener("status", (e: MessageEvent) => {
@@ -167,6 +328,7 @@ export default function Home() {
       closeMissionStream();
       setMissionStarted(false);
       void fetchTelemetry(true);
+      void fetchSurvivors(true);
     });
 
     es.addEventListener("mission_error", (e: MessageEvent) => {
@@ -222,11 +384,14 @@ export default function Home() {
       closeMissionStream();
       setMissionLoading(false);
       setMissionStarted(false);
+      setMissionElapsedSeconds(0);
       if (!silent) {
         addLog("[status] Mission stop requested.");
       }
+      setSimulationRunning(false);
       setMissionStopping(false);
       void fetchTelemetry(true);
+      void fetchSurvivors(true);
     }
   };
 
@@ -252,6 +417,12 @@ export default function Home() {
       }
 
       setLogs(["[status] Mission state reset complete. Starting new mission stream..."]);
+      setSurvivors([]);
+      missionCompletedLoggedRef.current = false;
+      setMissionCompleted(false);
+      setCompletedRound(null);
+      setCompletedMinutes(null);
+      setMissionElapsedSeconds(0);
       await startMission({ force: true });
     } catch {
       addLog("[error] Cannot reach backend restart_mission endpoint.");
@@ -261,7 +432,7 @@ export default function Home() {
   };
 
   return (
-    <main className="h-screen overflow-hidden bg-gradient-to-br from-slate-100 via-sky-50 to-cyan-100 p-3 md:p-4">
+    <main className="min-h-screen overflow-y-auto bg-gradient-to-br from-slate-100 via-sky-50 to-cyan-100 p-3 md:p-4">
       <div className="mx-auto flex w-full max-w-[1400px] items-center justify-between pb-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 md:text-3xl">Swarm Mission Dashboard</h1>
@@ -270,12 +441,15 @@ export default function Home() {
 
         <div className="flex items-center gap-3">
           <span className="text-sm font-medium text-slate-700">{statusLabel}</span>
+          <span className="rounded-lg bg-slate-800 px-3 py-1 font-mono text-sm font-semibold text-white">
+            {formattedMissionTimer}
+          </span>
           <button
             type="button"
             onClick={() => {
               void startMission();
             }}
-            disabled={missionLoading || missionStarted || missionStopping || missionRestarting}
+            disabled={missionLoading || missionStarted || missionStopping || missionRestarting || missionCompleted}
             className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {missionLoading ? "Connecting..." : missionStarted ? "Mission Active" : "Start Mission"}
@@ -285,7 +459,7 @@ export default function Home() {
             onClick={() => {
               void stopMission();
             }}
-            disabled={missionStopping || missionRestarting || (!missionStarted && !missionLoading)}
+            disabled={missionStopping || missionRestarting || missionCompleted}
             className="rounded-xl bg-rose-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-600 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {missionStopping ? "Stopping..." : "Stop Mission"}
@@ -303,17 +477,34 @@ export default function Home() {
         </div>
       </div>
 
+      {missionCompleted ? (
+        <section className="mx-auto mb-3 w-full max-w-[1400px] rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+          <p className="font-semibold">
+            Mission Complete: all drones returned to base and the simulation ended.
+          </p>
+          <p className="mt-1">
+            Survivor results: {survivorCounts.total} detected coordinates ({survivorCounts.suspect} suspect, {survivorCounts.confirmed} confirmed)
+            {completedRound !== null && completedMinutes !== null
+              ? ` at round ${completedRound} (${completedMinutes} min).`
+              : "."}
+          </p>
+        </section>
+      ) : null}
+
       <section className="mx-auto grid h-[calc(100vh-6.5rem)] w-full max-w-[1400px] min-h-0 grid-cols-1 gap-3 lg:grid-cols-5">
         <div className="min-h-0 lg:col-span-3 lg:h-full">
           <GridMap missionStarted={missionStarted} />
         </div>
 
-        <div className="grid min-h-0 gap-3 lg:col-span-2 lg:grid-rows-2">
+        <div className="grid min-h-0 gap-3 lg:col-span-2 lg:grid-rows-3">
           <div className="min-h-0">
             <MissionLog logs={logs} />
           </div>
           <div className="min-h-0">
             <BatteryDashboard drones={telemetry} />
+          </div>
+          <div className="min-h-0">
+            <SurvivorDashboard survivors={survivors} />
           </div>
         </div>
       </section>

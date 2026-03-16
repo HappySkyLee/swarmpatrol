@@ -84,7 +84,7 @@ export default function GridMap({ missionStarted }: GridMapProps) {
 
   const cellClass = (status: string, x: number, y: number) => {
     if (x === COMMAND_AGENT_BASE.x && y === COMMAND_AGENT_BASE.y) {
-      return "bg-black";
+      return "bg-emerald-500";
     }
     if (status === "suspect") {
       return "animate-pulse bg-orange-400";
