@@ -107,8 +107,7 @@ def thermal_scan(drone_id: int) -> dict[str, Any]:
     # Keep the placeholder method invocation for simulation flow.
     drone.thermal_scan()
 
-    cell_weight = int(model.search_grid[drone.y, drone.x])
-    real_signature_detected = cell_weight >= 3
+    real_signature_detected = bool(model.has_survivor_signature(drone.x, drone.y))
     false_alarm = (not real_signature_detected) and (random.random() < 0.30)
     thermal_signature_detected = real_signature_detected or false_alarm
 

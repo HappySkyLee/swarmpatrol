@@ -348,6 +348,7 @@ def grid_state() -> dict[str, object]:
                 status_grid[y][x] = status
 
         terrain_weights = model.search_grid.tolist()
+        hazard_types = model.hazard_grid.tolist()
         round_count = int(model.round_count)
         elapsed_minutes = int(model.elapsed_minutes)
         mission_phase = str(getattr(model, "mission_phase", "searching"))
@@ -361,10 +362,13 @@ def grid_state() -> dict[str, object]:
         "elapsed_minutes": elapsed_minutes,
         "terrain_legend": {
             "1": "clear_air",
-            "3": "heavy_smoke",
+            "4": "heavy_wind",
+            "6": "heavy_smoke",
         },
+        "hazard_legend": ["none", "heavy_wind", "heavy_smoke"],
         "status_legend": ["unvisited", "clear", "suspect", "survivor"],
         "terrain_weights": terrain_weights,
+        "hazard_types": hazard_types,
         "cell_status": status_grid,
         "mission_phase": mission_phase,
         "mission_completed": mission_completed,

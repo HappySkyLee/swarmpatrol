@@ -13,6 +13,14 @@ MIN_RETURN_RESERVE_BATTERY = 20
 MIN_SURVIVOR_SIGNATURES = 40
 MAX_SURVIVOR_SIGNATURES = 80
 SECONDARY_CONFIRM_PROBABILITY = 0.5
+TERRAIN_CLEAR_AIR = 1
+TERRAIN_HEAVY_WIND = 4
+TERRAIN_HEAVY_SMOKE = 6
+HAZARD_NONE = "none"
+HAZARD_HEAVY_SMOKE = "heavy_smoke"
+HAZARD_HEAVY_WIND = "heavy_wind"
+HAZARD_ZONE_SIZES = (3, 4, 5, 6, 7, 8, 9)
+HAZARD_ZONES_PER_TYPE = 5
 
 ZoneBounds = tuple[int, int, int, int]
 
@@ -91,8 +99,8 @@ class Drone(Agent):
             if existing in {"survivor", "survivor_found", "confirmed"}:
                 status = "survivor"
             else:
-                cell_weight = int(self.model.search_grid[self.y, self.x])
-                status = "suspect" if cell_weight >= 3 else "clear"
+                has_signature = bool(self.model.has_survivor_signature(self.x, self.y))
+                status = "suspect" if has_signature else "clear"
             self.model.update_shared_memory((self.x, self.y), status)
 
         return self.x, self.y
@@ -105,19 +113,69 @@ class Drone(Agent):
 
 
 
-search_area = np.ones((GRID_HEIGHT, GRID_WIDTH), dtype=int)
+def _diamond_cells(center_x: int, center_y: int, radius: int) -> list[tuple[int, int]]:
+    """Return all grid cells within Manhattan distance `radius` of center (diamond shape)."""
+    cells = []
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if abs(dx) + abs(dy) <= radius:
+                x = center_x + dx
+                y = center_y + dy
+                if 0 <= x < GRID_WIDTH and 0 <= y < GRID_HEIGHT:
+                    cells.append((x, y))
+    return cells
 
-# Randomly assign survivor-signature cells (weight 3) within 40-80 range.
-rng = np.random.default_rng()
-total_cells = GRID_WIDTH * GRID_HEIGHT
-base_index = COMMAND_AGENT_ORIGIN[1] * GRID_WIDTH + COMMAND_AGENT_ORIGIN[0]
-candidate_indices = np.array([idx for idx in range(total_cells) if idx != base_index])
-signature_cells = int(rng.integers(MIN_SURVIVOR_SIGNATURES, MAX_SURVIVOR_SIGNATURES + 1))
-signature_indices = rng.choice(candidate_indices, size=signature_cells, replace=False)
-search_area.flat[signature_indices] = 3
 
-# Keep deployment base clear.
-search_area[COMMAND_AGENT_ORIGIN[1], COMMAND_AGENT_ORIGIN[0]] = 1
+def _build_environment_grid(
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    terrain_grid = np.full((GRID_HEIGHT, GRID_WIDTH), TERRAIN_CLEAR_AIR, dtype=int)
+    hazard_grid = np.full((GRID_HEIGHT, GRID_WIDTH), HAZARD_NONE, dtype=object)
+
+    hazard_specs = [
+        (HAZARD_HEAVY_SMOKE, TERRAIN_HEAVY_SMOKE),
+        (HAZARD_HEAVY_WIND, TERRAIN_HEAVY_WIND),
+    ]
+
+    for hazard_name, terrain_weight in hazard_specs:
+        placed = 0
+        attempts = 0
+        while placed < HAZARD_ZONES_PER_TYPE and attempts < 100:
+            attempts += 1
+            size = int(rng.choice(HAZARD_ZONE_SIZES))
+            radius = size // 2
+            center_x = int(rng.integers(radius, GRID_WIDTH - radius))
+            center_y = int(rng.integers(radius, GRID_HEIGHT - radius))
+
+            cells = _diamond_cells(center_x, center_y, radius)
+
+            origin_x, origin_y = COMMAND_AGENT_ORIGIN
+            if any(x == origin_x and y == origin_y for x, y in cells):
+                continue
+
+            if any(hazard_grid[y, x] != HAZARD_NONE for x, y in cells):
+                continue
+
+            for x, y in cells:
+                terrain_grid[y, x] = terrain_weight
+                hazard_grid[y, x] = hazard_name
+            placed += 1
+
+    terrain_grid[COMMAND_AGENT_ORIGIN[1], COMMAND_AGENT_ORIGIN[0]] = TERRAIN_CLEAR_AIR
+    hazard_grid[COMMAND_AGENT_ORIGIN[1], COMMAND_AGENT_ORIGIN[0]] = HAZARD_NONE
+    return terrain_grid, hazard_grid
+
+
+def _build_survivor_signature_grid(rng: np.random.Generator) -> np.ndarray:
+    signature_grid = np.zeros((GRID_HEIGHT, GRID_WIDTH), dtype=bool)
+    total_cells = GRID_WIDTH * GRID_HEIGHT
+    base_index = COMMAND_AGENT_ORIGIN[1] * GRID_WIDTH + COMMAND_AGENT_ORIGIN[0]
+    candidate_indices = np.array([idx for idx in range(total_cells) if idx != base_index])
+    signature_cells = int(rng.integers(MIN_SURVIVOR_SIGNATURES, MAX_SURVIVOR_SIGNATURES + 1))
+    signature_indices = rng.choice(candidate_indices, size=signature_cells, replace=False)
+    signature_grid.flat[signature_indices] = True
+    signature_grid[COMMAND_AGENT_ORIGIN[1], COMMAND_AGENT_ORIGIN[0]] = False
+    return signature_grid
 
 
 class SwarmModel(MesaModel):
@@ -128,7 +186,16 @@ class SwarmModel(MesaModel):
         if not 4 <= num_drones <= 5:
             raise ValueError("num_drones must be between 4 and 5")
 
-        self.search_grid = np.array(grid, copy=True) if grid is not None else np.array(search_area, copy=True)
+        rng = np.random.default_rng()
+        if grid is not None:
+            self.search_grid = np.array(grid, copy=True)
+            self.hazard_grid = np.full(self.search_grid.shape, HAZARD_NONE, dtype=object)
+        else:
+            terrain_grid, hazard_grid = _build_environment_grid(rng)
+            self.search_grid = terrain_grid
+            self.hazard_grid = hazard_grid
+
+        self.survivor_signature_grid = _build_survivor_signature_grid(rng)
         self.shared_memory: dict[tuple[int, int], str] = {}
         self.round_count = 0
         self.elapsed_minutes = 0
@@ -152,6 +219,11 @@ class SwarmModel(MesaModel):
             )
             drone.target = self._random_target(zone)
             self.drones.append(drone)
+
+    def has_survivor_signature(self, x: int, y: int) -> bool:
+        if not (0 <= x < self.search_grid.shape[1] and 0 <= y < self.search_grid.shape[0]):
+            return False
+        return bool(self.survivor_signature_grid[y, x])
 
     def update_shared_memory(self, position: tuple[int, int], status: str) -> None:
         if status not in {"clear", "suspect", "survivor"}:
