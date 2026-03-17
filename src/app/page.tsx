@@ -31,6 +31,10 @@ type SurvivorsResponse = {
   survivors: Survivor[];
 };
 
+type GridStateResponse = {
+  cell_status: string[][];
+};
+
 const BACKEND_BASE_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
@@ -60,6 +64,28 @@ export default function Home() {
   const [missionElapsedSeconds, setMissionElapsedSeconds] = useState(0);
   const eventSourceRef = useRef<EventSource | null>(null);
   const missionCompletedLoggedRef = useRef(false);
+  const previousTelemetryRef = useRef<Map<number, Telemetry>>(new Map());
+  const previousDroneScanStatusRef = useRef<Map<number, string>>(new Map());
+
+  const withTimestamp = (line: string) => {
+    const now = new Date();
+    const hh = now.getHours().toString().padStart(2, "0");
+    const mm = now.getMinutes().toString().padStart(2, "0");
+    const ss = now.getSeconds().toString().padStart(2, "0");
+    return `[${hh}:${mm}:${ss}] ${line}`;
+  };
+
+  const prependLog = (line: string) => {
+    setLogs((prev) => [withTimestamp(line), ...prev].slice(0, 100));
+  };
+
+  const prependLogs = (lines: string[]) => {
+    if (lines.length === 0) {
+      return;
+    }
+    const stamped = lines.map((line) => withTimestamp(line));
+    setLogs((prev) => [...stamped.reverse(), ...prev].slice(0, 100));
+  };
 
   useEffect(() => {
     return () => {
@@ -109,16 +135,85 @@ export default function Home() {
 
   const fetchTelemetry = async (logErrors = false) => {
     try {
-      const response = await fetch(`${BACKEND_BASE_URL}/drone_telemetry`);
-      if (!response.ok) {
-        throw new Error(`Telemetry request failed (${response.status})`);
+      const [telemetryResponse, gridStateResponse] = await Promise.all([
+        fetch(`${BACKEND_BASE_URL}/drone_telemetry`),
+        fetch(`${BACKEND_BASE_URL}/grid_state`),
+      ]);
+
+      if (!telemetryResponse.ok) {
+        throw new Error(`Telemetry request failed (${telemetryResponse.status})`);
       }
-      const data = (await response.json()) as Telemetry[];
+      const data = (await telemetryResponse.json()) as Telemetry[];
+      const gridState = gridStateResponse.ok
+        ? ((await gridStateResponse.json()) as GridStateResponse)
+        : null;
+
+      const nextTelemetryMap = new Map<number, Telemetry>();
+      const nextDroneScanStatusMap = new Map<number, string>();
+      for (const drone of data) {
+        nextTelemetryMap.set(drone.drone_id, drone);
+      }
+
+      if (previousTelemetryRef.current.size > 0) {
+        const droneActivityLines: string[] = [];
+
+        const ordered = [...data].sort((a, b) => a.drone_id - b.drone_id);
+        for (const drone of ordered) {
+          const previous = previousTelemetryRef.current.get(drone.drone_id);
+          if (!previous) {
+            continue;
+          }
+
+          const actionParts: string[] = [];
+          if (previous.x !== drone.x || previous.y !== drone.y) {
+            actionParts.push(
+              `moved (${previous.x},${previous.y}) -> (${drone.x},${drone.y})`
+            );
+          }
+          if (previous.mode !== drone.mode) {
+            actionParts.push(`mode ${previous.mode} -> ${drone.mode}`);
+          }
+
+          const scanStatus = gridState?.cell_status?.[drone.y]?.[drone.x];
+          if (scanStatus) {
+            nextDroneScanStatusMap.set(drone.drone_id, scanStatus);
+            const previousScanStatus = previousDroneScanStatusRef.current.get(drone.drone_id);
+            const isScanEvent =
+              scanStatus === "clear" || scanStatus === "suspect" || scanStatus === "survivor";
+
+            if (isScanEvent && ((previous.x !== drone.x || previous.y !== drone.y) || previousScanStatus !== scanStatus)) {
+              actionParts.push(`scan ${scanStatus} at (${drone.x},${drone.y})`);
+            }
+          }
+
+          if (actionParts.length > 0) {
+            droneActivityLines.push(
+              `[drone ${drone.drone_id}] ${actionParts.join(" | ")} | battery ${
+                drone.battery_percentage
+              }%`
+            );
+          }
+        }
+
+        if (droneActivityLines.length > 0) {
+          prependLogs(droneActivityLines);
+        }
+      } else {
+        for (const drone of data) {
+          const scanStatus = gridState?.cell_status?.[drone.y]?.[drone.x];
+          if (scanStatus) {
+            nextDroneScanStatusMap.set(drone.drone_id, scanStatus);
+          }
+        }
+      }
+
+      previousTelemetryRef.current = nextTelemetryMap;
+      previousDroneScanStatusRef.current = nextDroneScanStatusMap;
       setTelemetry(data);
     } catch (error) {
       if (logErrors) {
         const message = error instanceof Error ? error.message : "Telemetry failed";
-        setLogs((prev) => [`[error] ${message}`, ...prev]);
+        prependLog(`[error] ${message}`);
       }
     }
   };
@@ -134,7 +229,7 @@ export default function Home() {
     } catch (error) {
       if (logErrors) {
         const message = error instanceof Error ? error.message : "Survivor fetch failed";
-        setLogs((prev) => [`[error] ${message}`, ...prev]);
+        prependLog(`[error] ${message}`);
       }
     }
   };
@@ -251,7 +346,7 @@ export default function Home() {
     setMissionLoading(false);
     setMissionStarted(false);
     setSimulationRunning(false);
-    setLogs((prev) => ["[status] Mission complete: all drones returned to base.", ...prev].slice(0, 100));
+    prependLog("[status] Mission complete: all drones returned to base.");
     void fetchTelemetry(true);
     void fetchSurvivors(true);
   }, [missionCompleted]);
@@ -273,8 +368,7 @@ export default function Home() {
       setCompletedMinutes(null);
     }
 
-    const addLog = (line: string) =>
-      setLogs((prev) => [line, ...prev].slice(0, 100));
+    const addLog = (line: string) => prependLog(line);
 
     const readiness = await checkMissionReadiness();
     if (!readiness.ok) {
@@ -366,8 +460,7 @@ export default function Home() {
     }
 
     setMissionStopping(true);
-    const addLog = (line: string) =>
-      setLogs((prev) => [line, ...prev].slice(0, 100));
+    const addLog = (line: string) => prependLog(line);
 
     try {
       const response = await fetch(`${BACKEND_BASE_URL}/stop_mission`, {
@@ -401,8 +494,7 @@ export default function Home() {
     }
 
     setMissionRestarting(true);
-    const addLog = (line: string) =>
-      setLogs((prev) => [line, ...prev].slice(0, 100));
+    const addLog = (line: string) => prependLog(line);
 
     await stopMission({ silent: true });
 
@@ -416,7 +508,7 @@ export default function Home() {
         return;
       }
 
-      setLogs(["[status] Mission state reset complete. Starting new mission stream..."]);
+      setLogs([withTimestamp("[status] Mission state reset complete. Starting new mission stream...")]);
       setSurvivors([]);
       missionCompletedLoggedRef.current = false;
       setMissionCompleted(false);
