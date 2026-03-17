@@ -1,5 +1,5 @@
 # Swarm Patrol 
-![Preview](Snapshots/Preview1.png)
+![Preview](Snapshots/Preview3.png)
 
 The ASEAN region is highly vulnerable to super typhoons and earthquakes. These disasters often cause catastrophic terrestrial communication failures in the critical first 72 hours, rendering cloud-dependent AI models useless. Because current rescue models rely on centralized, high-bandwidth cloud connectivity, they fail when infrastructure collapses.
 
