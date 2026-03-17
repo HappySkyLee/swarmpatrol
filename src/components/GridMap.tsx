@@ -144,7 +144,7 @@ export default function GridMap({ missionStarted }: GridMapProps) {
   return (
     <section className="h-full rounded-2xl border border-slate-200 bg-white/70 p-5 shadow-sm backdrop-blur">
       <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-slate-900">GridMap</h2>
+        <h2 className="text-lg font-semibold text-slate-900">Grid Map</h2>
         <div className="flex items-center gap-2 flex-wrap justify-end">
           <span className="flex items-center gap-1 text-xs text-slate-600">
             <span className="inline-block h-3 w-3 rounded-sm bg-orange-400" />

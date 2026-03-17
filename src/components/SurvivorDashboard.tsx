@@ -43,26 +43,15 @@ export default function SurvivorDashboard({ survivors }: SurvivorDashboardProps)
                   <p className="text-sm font-semibold text-slate-900">
                     Coordinate ({survivor.x}, {survivor.y})
                   </p>
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                        survivor.status === "confirmed"
-                          ? "bg-red-100 text-red-700"
-                          : "bg-orange-100 text-orange-700"
-                      }`}
-                    >
-                      {survivor.status === "confirmed" ? "Confirmed Survivor" : "Orange Suspect"}
-                    </span>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                        survivor.route_ready
-                          ? "bg-emerald-100 text-emerald-700"
-                          : "bg-amber-100 text-amber-700"
-                      }`}
-                    >
-                      {survivor.route_ready ? "Route Ready" : "Awaiting Route"}
-                    </span>
-                  </div>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                      survivor.status === "confirmed"
+                        ? "bg-red-100 text-red-700"
+                        : "bg-orange-100 text-orange-700"
+                    }`}
+                  >
+                    {survivor.status === "confirmed" ? "Confirmed Survivor" : "Suspect"}
+                  </span>
                 </div>
                 <p className="mt-1 text-xs text-slate-600">
                   Detected at round {survivor.detected_round} ({survivor.detected_elapsed_minutes} min)

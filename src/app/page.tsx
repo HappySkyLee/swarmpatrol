@@ -527,7 +527,7 @@ export default function Home() {
     <main className="min-h-screen overflow-y-auto bg-gradient-to-br from-slate-100 via-sky-50 to-cyan-100 p-3 md:p-4">
       <div className="mx-auto flex w-full max-w-[1400px] items-center justify-between pb-3">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900 md:text-3xl">Swarm Mission Dashboard</h1>
+          <h1 className="text-2xl font-bold text-slate-900 md:text-3xl">Swarm Patrol</h1>
           <p className="text-sm text-slate-600">Command Agent Base: (20,20)</p>
         </div>
 
