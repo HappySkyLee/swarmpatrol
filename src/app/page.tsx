@@ -61,7 +61,6 @@ export default function Home() {
   const [missionCompleted, setMissionCompleted] = useState(false);
   const [completedRound, setCompletedRound] = useState<number | null>(null);
   const [completedMinutes, setCompletedMinutes] = useState<number | null>(null);
-  const [missionElapsedSeconds, setMissionElapsedSeconds] = useState(0);
   const eventSourceRef = useRef<EventSource | null>(null);
   const missionCompletedLoggedRef = useRef(false);
   const previousTelemetryRef = useRef<Map<number, Telemetry>>(new Map());
@@ -114,19 +113,6 @@ export default function Home() {
     const confirmed = survivors.filter((item) => item.status === "confirmed").length;
     return { unconfirmed, confirmed, total: survivors.length };
   }, [survivors]);
-
-  const formattedMissionTimer = useMemo(() => {
-    const total = Math.max(0, Math.floor(missionElapsedSeconds));
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const seconds = total % 60;
-    if (hours > 0) {
-      return `${hours.toString().padStart(2, "0")}:${minutes
-        .toString()
-        .padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
-    }
-    return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
-  }, [missionElapsedSeconds]);
 
   const closeMissionStream = () => {
     eventSourceRef.current?.close();
@@ -259,12 +245,6 @@ export default function Home() {
 
       const health = (await response.json()) as HealthResponse;
       setSimulationRunning(Boolean(health.simulation_running));
-      if (
-        health.mission_phase === "searching" &&
-        typeof health.elapsed_minutes === "number"
-      ) {
-        setMissionElapsedSeconds(Math.max(0, Math.floor(health.elapsed_minutes)) * 60);
-      }
       setMissionCompleted(Boolean(health.mission_completed));
       setCompletedRound(
         typeof health.completed_round === "number" ? health.completed_round : null
@@ -304,12 +284,6 @@ export default function Home() {
         const health = (await response.json()) as HealthResponse;
         if (!cancelled) {
           setSimulationRunning(Boolean(health.simulation_running));
-          if (
-            health.mission_phase === "searching" &&
-            typeof health.elapsed_minutes === "number"
-          ) {
-            setMissionElapsedSeconds(Math.max(0, Math.floor(health.elapsed_minutes)) * 60);
-          }
           setMissionCompleted(Boolean(health.mission_completed));
           setCompletedRound(
             typeof health.completed_round === "number" ? health.completed_round : null
@@ -359,7 +333,6 @@ export default function Home() {
 
     closeMissionStream();
     setMissionLoading(true);
-    setMissionElapsedSeconds(0);
 
     if (missionCompleted) {
       missionCompletedLoggedRef.current = false;
@@ -477,7 +450,6 @@ export default function Home() {
       closeMissionStream();
       setMissionLoading(false);
       setMissionStarted(false);
-      setMissionElapsedSeconds(0);
       if (!silent) {
         addLog("[status] Mission stop requested.");
       }
@@ -514,7 +486,6 @@ export default function Home() {
       setMissionCompleted(false);
       setCompletedRound(null);
       setCompletedMinutes(null);
-      setMissionElapsedSeconds(0);
       await startMission({ force: true });
     } catch {
       addLog("[error] Cannot reach backend restart_mission endpoint.");
@@ -533,9 +504,6 @@ export default function Home() {
 
         <div className="flex items-center gap-3">
           <span className="text-sm font-medium text-slate-700">{statusLabel}</span>
-          <span className="rounded-lg bg-slate-800 px-3 py-1 font-mono text-sm font-semibold text-white">
-            {formattedMissionTimer}
-          </span>
           <button
             type="button"
             onClick={() => {
