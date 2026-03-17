@@ -21,7 +21,7 @@ SYSTEM_PROMPT = (
     "Always discover drones with list_active_drones before issuing drone-specific commands. "
     "Use tools as needed and perform multiple tool calls in a single response when required. "
     "Use shared memory from prior thermal scans to avoid re-scanning known cells unless explicitly requested. "
-    "When thermal_scan reports a suspect hit, do not immediately confirm survivor status. "
+    "When thermal_scan reports an unconfirmed hit, do not immediately confirm survivor status. "
     "First triage using battery and mission priority: compare available active drones, check battery levels, "
     "and decide whether to dispatch a second drone for multimodal verification or continue sweep. "
     "Only use verify_survivor after this triage decision is justified. "
@@ -34,7 +34,7 @@ SYSTEM_PROMPT = (
 class SharedMemoryContext:
     """Persistent in-process context built from thermal scan tool outputs."""
 
-    # (x, y) -> {'status': 'clear'|'suspect', 'source_drone_id': int|None}
+    # (x, y) -> {'status': 'clear'|'unconfirmed', 'source_drone_id': int|None}
     scanned_cells: dict[tuple[int, int], dict[str, Any]] = field(default_factory=dict)
     # (x, y) -> {'source_drone_id': int|None, 'verified': bool}
     pending_verification: dict[tuple[int, int], dict[str, Any]] = field(default_factory=dict)
@@ -54,7 +54,7 @@ class SharedMemoryContext:
 
         if not isinstance(position, list) or len(position) != 2:
             return
-        if status not in {"clear", "suspect"}:
+        if status not in {"clear", "unconfirmed"}:
             return
 
         x, y = int(position[0]), int(position[1])
@@ -62,14 +62,14 @@ class SharedMemoryContext:
             "status": status,
             "source_drone_id": int(drone_id) if isinstance(drone_id, int) else None,
         }
-        if status == "suspect":
+        if status == "unconfirmed":
             self.pending_verification[(x, y)] = {
                 "source_drone_id": int(drone_id) if isinstance(drone_id, int) else None,
                 "verified": False,
             }
 
     def update_from_verify_survivor(self, observation: Any) -> None:
-        """Ingest verify_survivor output and resolve pending suspect status."""
+        """Ingest verify_survivor output and resolve pending unconfirmed status."""
         if not isinstance(observation, dict):
             return
 
@@ -118,7 +118,9 @@ class SharedMemoryContext:
             return "No scanned cells yet."
 
         clear_cells = [pos for pos, data in self.scanned_cells.items() if data["status"] == "clear"]
-        suspect_cells = [pos for pos, data in self.scanned_cells.items() if data["status"] == "suspect"]
+        unconfirmed_cells = [
+            pos for pos, data in self.scanned_cells.items() if data["status"] == "unconfirmed"
+        ]
         unresolved = [
             pos for pos, data in self.pending_verification.items() if not bool(data.get("verified", False))
         ]
@@ -127,16 +129,18 @@ class SharedMemoryContext:
 
         return (
             f"Known clear cells ({len(clear_cells)}): {clear_cells[:20]}\n"
-            f"Known suspect cells ({len(suspect_cells)}): {suspect_cells[:20]}\n"
-            f"Pending suspect verification cells ({len(unresolved)}): {unresolved[:20]}\n"
+            f"Known unconfirmed cells ({len(unconfirmed_cells)}): {unconfirmed_cells[:20]}\n"
+            f"Pending unconfirmed verification cells ({len(unresolved)}): {unresolved[:20]}\n"
             f"Confirmed survivors ({len(confirmed)}): {confirmed[:20]}\n"
             f"Confirmed survivors with planned rescue routes ({len(routed)}): {routed[:20]}\n"
-            "Planning rule: avoid thermal_scan on known clear/suspect cells unless recheck is explicitly required."
+            "Planning rule: avoid thermal_scan on known clear/unconfirmed cells unless recheck is explicitly required."
         )
 
     def to_global_plan(self) -> str:
         """Return a concise global planning directive based on shared memory."""
-        suspect_count = sum(1 for data in self.scanned_cells.values() if data["status"] == "suspect")
+        unconfirmed_count = sum(
+            1 for data in self.scanned_cells.values() if data["status"] == "unconfirmed"
+        )
         clear_count = sum(1 for data in self.scanned_cells.values() if data["status"] == "clear")
         unresolved_count = sum(
             1 for data in self.pending_verification.values() if not bool(data.get("verified", False))
@@ -144,19 +148,19 @@ class SharedMemoryContext:
         confirmed_count = len(self.confirmed_survivors)
         routed_count = len(self.rescue_routes)
         return (
-            "Global plan: prioritize unscanned cells for exploration, dispatch secondary verification for suspect "
-            f"cells, and skip redundant scans for {clear_count + suspect_count} already-scanned cells. "
-            f"Unresolved suspect cells awaiting triage/verification: {unresolved_count}. "
+            "Global plan: prioritize unscanned cells for exploration, dispatch secondary verification for unconfirmed "
+            f"cells, and skip redundant scans for {clear_count + unconfirmed_count} already-scanned cells. "
+            f"Unresolved unconfirmed cells awaiting triage/verification: {unresolved_count}. "
             f"Verified survivors: {confirmed_count}. Rescue routes prepared: {routed_count}."
         )
 
 
-SUSPECT_TRIAGE_POLICY = (
-    "Suspect triage policy:\n"
-    "1) After suspect thermal hit, do not confirm survivor immediately.\n"
+UNCONFIRMED_TRIAGE_POLICY = (
+    "Unconfirmed triage policy:\n"
+    "1) After an unconfirmed thermal hit, do not confirm survivor immediately.\n"
     "2) Call list_active_drones and get_battery_status for candidate drones before deciding.\n"
     "3) If a second drone has sufficient battery margin for travel + verification + return, dispatch it to verify.\n"
-    "4) If battery margins are poor or mission priority favors broader search, continue sweep and queue suspect for later verification.\n"
+    "4) If battery margins are poor or mission priority favors broader search, continue sweep and queue unconfirmed cells for later verification.\n"
     "5) Only call verify_survivor after documenting why verification is now justified."
 )
 
@@ -241,7 +245,7 @@ def create_orchestrator(server_script: str = "mcp_server.py") -> AgentExecutor:
                 SYSTEM_PROMPT
                 + "\n\nShared Memory Context:\n{shared_memory_context}\n\n"
                 + "Global Search Plan:\n{global_search_plan}\n\n"
-                + "Decision Policy:\n{suspect_triage_policy}\n\n"
+                + "Decision Policy:\n{unconfirmed_triage_policy}\n\n"
                 + "Mission State Policy:\n{human_rescue_routing_policy}",
             ),
             ("human", "{input}"),
@@ -287,7 +291,7 @@ class CommandAgentOrchestrator:
             "input": user_input,
             "shared_memory_context": self.shared_memory.to_prompt_context(),
             "global_search_plan": self.shared_memory.to_global_plan(),
-            "suspect_triage_policy": SUSPECT_TRIAGE_POLICY,
+            "unconfirmed_triage_policy": UNCONFIRMED_TRIAGE_POLICY,
             "human_rescue_routing_policy": HUMAN_RESCUE_ROUTING_POLICY,
         }
         result = self.executor.invoke(payload)
@@ -317,7 +321,7 @@ class CommandAgentOrchestrator:
             "input": user_input,
             "shared_memory_context": self.shared_memory.to_prompt_context(),
             "global_search_plan": self.shared_memory.to_global_plan(),
-            "suspect_triage_policy": SUSPECT_TRIAGE_POLICY,
+            "unconfirmed_triage_policy": UNCONFIRMED_TRIAGE_POLICY,
             "human_rescue_routing_policy": HUMAN_RESCUE_ROUTING_POLICY,
         }
 

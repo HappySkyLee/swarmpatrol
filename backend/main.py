@@ -136,7 +136,7 @@ def _require_orchestrator() -> Any:
 
 
 def _sync_survivor_registry_from_orchestrator() -> None:
-    """Upgrade suspect detections to confirmed survivors from orchestrator memory."""
+    """Upgrade unconfirmed detections to confirmed survivors from orchestrator memory."""
     if orchestrator is None:
         return
 
@@ -168,13 +168,13 @@ def _sync_survivor_registry_from_orchestrator() -> None:
         existing["status"] = "confirmed"
 
 
-def _sync_suspect_registry_from_model() -> None:
-    """Record suspect/confirmed survivor cells from simulation shared memory."""
+def _sync_unconfirmed_registry_from_model() -> None:
+    """Record unconfirmed/confirmed survivor cells from simulation shared memory."""
     current_round = int(model.round_count)
     elapsed = int(model.elapsed_minutes)
 
     for pos, cell_status in model.shared_memory.items():
-        if cell_status not in {"suspect", "survivor"}:
+        if cell_status not in {"unconfirmed", "survivor"}:
             continue
 
         x, y = int(pos[0]), int(pos[1])
@@ -186,7 +186,7 @@ def _sync_suspect_registry_from_model() -> None:
                 "y": y,
                 "detected_round": current_round,
                 "detected_elapsed_minutes": elapsed,
-                "status": "confirmed" if cell_status == "survivor" else "suspect",
+                "status": "confirmed" if cell_status == "survivor" else "unconfirmed",
             }
             continue
 
@@ -301,9 +301,9 @@ def restart_mission() -> dict[str, object]:
 
 @app.get("/survivors")
 def survivors() -> dict[str, object]:
-    """Return suspect and confirmed survivor coordinates discovered so far."""
+    """Return unconfirmed and confirmed survivor coordinates discovered so far."""
     with simulation_lock:
-        _sync_suspect_registry_from_model()
+        _sync_unconfirmed_registry_from_model()
         _sync_survivor_registry_from_orchestrator()
         survivors_list = sorted(
             survivor_registry.values(),
@@ -326,12 +326,12 @@ def survivors() -> dict[str, object]:
         ]
 
         confirmed_count = sum(1 for item in enriched if item.get("status") == "confirmed")
-        suspect_count = sum(1 for item in enriched if item.get("status") == "suspect")
+        unconfirmed_count = sum(1 for item in enriched if item.get("status") == "unconfirmed")
 
         return {
             "count": len(enriched),
             "confirmed_count": confirmed_count,
-            "suspect_count": suspect_count,
+            "unconfirmed_count": unconfirmed_count,
             "survivors": enriched,
         }
 
@@ -344,7 +344,7 @@ def grid_state() -> dict[str, object]:
         status_grid = [["unvisited" for _ in range(width)] for _ in range(height)]
 
         for (x, y), status in model.shared_memory.items():
-            if 0 <= x < width and 0 <= y < height and status in {"clear", "suspect", "survivor"}:
+            if 0 <= x < width and 0 <= y < height and status in {"clear", "unconfirmed", "survivor"}:
                 status_grid[y][x] = status
 
         terrain_weights = model.search_grid.tolist()
@@ -366,7 +366,7 @@ def grid_state() -> dict[str, object]:
             "6": "heavy_smoke",
         },
         "hazard_legend": ["none", "heavy_wind", "heavy_smoke"],
-        "status_legend": ["unvisited", "clear", "suspect", "survivor"],
+        "status_legend": ["unvisited", "clear", "unconfirmed", "survivor"],
         "terrain_weights": terrain_weights,
         "hazard_types": hazard_types,
         "cell_status": status_grid,

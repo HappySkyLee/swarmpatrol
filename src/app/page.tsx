@@ -20,14 +20,14 @@ type Survivor = {
   y: number;
   detected_round: number;
   detected_elapsed_minutes: number;
-  status: "suspect" | "confirmed";
+  status: "unconfirmed" | "confirmed";
   route_ready: boolean;
 };
 
 type SurvivorsResponse = {
   count: number;
   confirmed_count: number;
-  suspect_count: number;
+  unconfirmed_count: number;
   survivors: Survivor[];
 };
 
@@ -110,9 +110,9 @@ export default function Home() {
   ]);
 
   const survivorCounts = useMemo(() => {
-    const suspect = survivors.filter((item) => item.status === "suspect").length;
+    const unconfirmed = survivors.filter((item) => item.status === "unconfirmed").length;
     const confirmed = survivors.filter((item) => item.status === "confirmed").length;
-    return { suspect, confirmed, total: survivors.length };
+    return { unconfirmed, confirmed, total: survivors.length };
   }, [survivors]);
 
   const formattedMissionTimer = useMemo(() => {
@@ -179,7 +179,7 @@ export default function Home() {
             nextDroneScanStatusMap.set(drone.drone_id, scanStatus);
             const previousScanStatus = previousDroneScanStatusRef.current.get(drone.drone_id);
             const isScanEvent =
-              scanStatus === "clear" || scanStatus === "suspect" || scanStatus === "survivor";
+              scanStatus === "clear" || scanStatus === "unconfirmed" || scanStatus === "survivor";
 
             if (isScanEvent && ((previous.x !== drone.x || previous.y !== drone.y) || previousScanStatus !== scanStatus)) {
               actionParts.push(`scan ${scanStatus} at (${drone.x},${drone.y})`);
@@ -575,7 +575,7 @@ export default function Home() {
             Mission Complete: all drones returned to base and the simulation ended.
           </p>
           <p className="mt-1">
-            Survivor results: {survivorCounts.total} detected coordinates ({survivorCounts.suspect} suspect, {survivorCounts.confirmed} confirmed)
+            Survivor results: {survivorCounts.total} detected coordinates ({survivorCounts.unconfirmed} unconfirmed, {survivorCounts.confirmed} confirmed)
             {completedRound !== null && completedMinutes !== null
               ? ` at round ${completedRound} (${completedMinutes} min).`
               : "."}

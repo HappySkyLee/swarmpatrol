@@ -93,7 +93,7 @@ export default function GridMap({ missionStarted }: GridMapProps) {
     if (x === COMMAND_AGENT_BASE.x && y === COMMAND_AGENT_BASE.y) {
       return "bg-emerald-500";
     }
-    if (status === "suspect") {
+    if (status === "unconfirmed") {
       return "animate-pulse bg-orange-400";
     }
     if (status === "survivor_found" || status === "survivor") {
@@ -148,7 +148,7 @@ export default function GridMap({ missionStarted }: GridMapProps) {
         <div className="flex items-center gap-2 flex-wrap justify-end">
           <span className="flex items-center gap-1 text-xs text-slate-600">
             <span className="inline-block h-3 w-3 rounded-sm bg-orange-400" />
-            Suspect
+            Unconfirmed
           </span>
           <span className="flex items-center gap-1 text-xs text-slate-600">
             <span className="inline-block h-3 w-3 rounded-sm bg-red-500" />

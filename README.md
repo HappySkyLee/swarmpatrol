@@ -20,7 +20,7 @@ The simulation or real-world logic operates in turns, proposing "1 minutes as on
 Moving one step or 1 minute consumes 1% of a drone's battery. Charging a drone takes 20 minutes.  
 
 ### •	**Exploration Logic:**  
-As drones move, they mark grid cells as "visited" as dark grey block, "suspect" as orange block, "Confirmed Survivor" as red block. The notes explicitly mention using a A* algorithm to handle this grid traversal.  
+As drones move, they mark grid cells as "visited" as dark grey block, "unconfirmed" as orange block, "Confirmed Survivor" as red block. The notes explicitly mention using a A* algorithm to handle this grid traversal.  
 
 ### •	**Swarm Intelligence:**   
 Drones utilize "shared memory." When one drone maps an area or finds an obstacle, other drones instantly update their own pathfinding logic based on that shared data.  

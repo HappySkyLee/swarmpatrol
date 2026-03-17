@@ -59,7 +59,7 @@ class Drone(Agent):
         self,
         new_position: tuple[int, int],
         constrain_to_assigned_zone: bool = True,
-        avoid_suspect: bool = True,
+        avoid_unconfirmed: bool = True,
     ) -> tuple[int, int]:
         """Move one A*-planned step toward new_position and consume 1% battery."""
         if self.state == "failed":
@@ -80,7 +80,7 @@ class Drone(Agent):
                 (self.x, self.y),
                 new_position,
                 zone_bounds=use_zone_bounds,
-                avoid_suspect=avoid_suspect,
+                avoid_unconfirmed=avoid_unconfirmed,
             )
             if len(path) > 1:
                 next_x, next_y = path[1]
@@ -100,7 +100,7 @@ class Drone(Agent):
                 status = "survivor"
             else:
                 has_signature = bool(self.model.has_survivor_signature(self.x, self.y))
-                status = "suspect" if has_signature else "clear"
+                status = "unconfirmed" if has_signature else "clear"
             self.model.update_shared_memory((self.x, self.y), status)
 
         return self.x, self.y
@@ -226,8 +226,8 @@ class SwarmModel(MesaModel):
         return bool(self.survivor_signature_grid[y, x])
 
     def update_shared_memory(self, position: tuple[int, int], status: str) -> None:
-        if status not in {"clear", "suspect", "survivor"}:
-            raise ValueError("status must be 'clear', 'suspect', or 'survivor'")
+        if status not in {"clear", "unconfirmed", "survivor"}:
+            raise ValueError("status must be 'clear', 'unconfirmed', or 'survivor'")
         self.shared_memory[position] = status
 
     def _build_zone_assignments(self) -> list[ZoneBounds]:
@@ -272,7 +272,7 @@ class SwarmModel(MesaModel):
                 (drone.x, drone.y),
                 COMMAND_AGENT_ORIGIN,
                 zone_bounds=None,
-                avoid_suspect=False,
+                avoid_unconfirmed=False,
             )
             return max(0, len(path) - 1)
         except ValueError:
@@ -294,8 +294,8 @@ class SwarmModel(MesaModel):
         if len(self.shared_memory) < width * height:
             return False
 
-        # Mission search is complete only after all suspects are double-checked.
-        return all(status != "suspect" for status in self.shared_memory.values())
+        # Mission search is complete only after all unconfirmed cells are double-checked.
+        return all(status != "unconfirmed" for status in self.shared_memory.values())
 
     def _all_active_drones_at_origin(self) -> bool:
         active_drones = [drone for drone in self.drones if drone.state == "active"]
@@ -358,24 +358,24 @@ class SwarmModel(MesaModel):
 
     def _schedule_secondary_verification(
         self,
-        suspect_position: tuple[int, int],
+        unconfirmed_position: tuple[int, int],
         source_drone_index: int,
     ) -> None:
         if self.mission_phase != "searching":
             return
-        if self.shared_memory.get(suspect_position) != "suspect":
+        if self.shared_memory.get(unconfirmed_position) != "unconfirmed":
             return
-        if suspect_position in self.pending_secondary_checks:
+        if unconfirmed_position in self.pending_secondary_checks:
             return
 
-        verifier_index = self._nearest_available_second_drone(suspect_position, source_drone_index)
+        verifier_index = self._nearest_available_second_drone(unconfirmed_position, source_drone_index)
         if verifier_index is None:
             return
 
         verifier = self.drones[verifier_index]
         verifier.mode = "verifying"
-        verifier.target = suspect_position
-        self.pending_secondary_checks[suspect_position] = verifier_index
+        verifier.target = unconfirmed_position
+        self.pending_secondary_checks[unconfirmed_position] = verifier_index
 
     def _resolve_secondary_verification(
         self,
@@ -384,7 +384,7 @@ class SwarmModel(MesaModel):
     ) -> None:
         verifier = self.drones[verifier_index]
 
-        if self.shared_memory.get(position) != "suspect":
+        if self.shared_memory.get(position) != "unconfirmed":
             self.pending_secondary_checks.pop(position, None)
             verifier.mode = "exploring"
             verifier.target = None
@@ -405,13 +405,13 @@ class SwarmModel(MesaModel):
         if self.mission_phase != "searching":
             return
 
-        suspect_positions = [
-            pos for pos, status in self.shared_memory.items() if status == "suspect"
+        unconfirmed_positions = [
+            pos for pos, status in self.shared_memory.items() if status == "unconfirmed"
         ]
-        for suspect_position in suspect_positions:
-            if suspect_position in self.pending_secondary_checks:
+        for unconfirmed_position in unconfirmed_positions:
+            if unconfirmed_position in self.pending_secondary_checks:
                 continue
-            self._schedule_secondary_verification(suspect_position, source_drone_index=-1)
+            self._schedule_secondary_verification(unconfirmed_position, source_drone_index=-1)
 
     def step(self) -> None:
         """Advance the simulation by 1 round (1 minute)."""
@@ -447,7 +447,7 @@ class SwarmModel(MesaModel):
                 drone.move_to(
                     COMMAND_AGENT_ORIGIN,
                     constrain_to_assigned_zone=False,
-                    avoid_suspect=False,
+                    avoid_unconfirmed=False,
                 )
                 if (drone.x, drone.y) == COMMAND_AGENT_ORIGIN:
                     drone.mode = "standby"
@@ -464,7 +464,7 @@ class SwarmModel(MesaModel):
                     drone.move_to(
                         target,
                         constrain_to_assigned_zone=False,
-                        avoid_suspect=False,
+                        avoid_unconfirmed=False,
                     )
 
                 if (drone.x, drone.y) == target:
@@ -501,7 +501,7 @@ class SwarmModel(MesaModel):
                 drone.move_to(
                     COMMAND_AGENT_ORIGIN,
                     constrain_to_assigned_zone=False,
-                    avoid_suspect=False,
+                    avoid_unconfirmed=False,
                 )
                 if (drone.x, drone.y) == COMMAND_AGENT_ORIGIN:
                     drone.mode = "recharging"
@@ -513,7 +513,7 @@ class SwarmModel(MesaModel):
             drone.move_to(drone.target)
             drone.thermal_scan()
             current_position = (drone.x, drone.y)
-            if self.shared_memory.get(current_position) == "suspect":
+            if self.shared_memory.get(current_position) == "unconfirmed":
                 source_index = self.drones.index(drone)
                 self._schedule_secondary_verification(current_position, source_index)
 
@@ -525,7 +525,7 @@ class SwarmModel(MesaModel):
         start: tuple[int, int],
         goal: tuple[int, int],
         zone_bounds: ZoneBounds | None = None,
-        avoid_suspect: bool = True,
+        avoid_unconfirmed: bool = True,
     ) -> tuple[list[tuple[int, int]], int]:
         return find_battery_efficient_path(
             self.search_grid,
@@ -533,7 +533,7 @@ class SwarmModel(MesaModel):
             goal,
             self.shared_memory,
             zone_bounds=zone_bounds,
-            avoid_suspect=avoid_suspect,
+            avoid_unconfirmed=avoid_unconfirmed,
         )
 
 
@@ -576,7 +576,7 @@ def find_battery_efficient_path(
     goal: tuple[int, int],
     shared_memory: dict[tuple[int, int], str] | None = None,
     zone_bounds: ZoneBounds | None = None,
-    avoid_suspect: bool = True,
+    avoid_unconfirmed: bool = True,
 ) -> tuple[list[tuple[int, int]], int]:
     """Find the minimum-cost route between two coordinates using A*.
 
@@ -603,12 +603,12 @@ def find_battery_efficient_path(
         ]
         graph.remove_nodes_from(outside_zone)
 
-    if shared_memory and avoid_suspect:
-        # Treat discovered suspect cells as non-traversable for all drones.
+    if shared_memory and avoid_unconfirmed:
+        # Treat discovered unconfirmed cells as non-traversable for all drones.
         blocked_nodes = [
             pos
             for pos, status in shared_memory.items()
-            if status == "suspect" and pos not in {start, goal} and graph.has_node(pos)
+            if status == "unconfirmed" and pos not in {start, goal} and graph.has_node(pos)
         ]
         graph.remove_nodes_from(blocked_nodes)
 
