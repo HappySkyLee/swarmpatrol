@@ -38,7 +38,7 @@ Once a survivor is confirmed, the AI analyzes the grid to plot a safe, optimal r
 npm install
 ```
 ```
-npm dev run
+npm run dev
 ```
 ### Backend
 ```
