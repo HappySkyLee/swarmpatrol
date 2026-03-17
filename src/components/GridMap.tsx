@@ -10,6 +10,7 @@ type GridStateResponse = {
   width: number;
   height: number;
   cell_status: string[][];
+  hazard_types: string[][];
 };
 
 type DroneTelemetry = {
@@ -30,6 +31,9 @@ const defaultGrid = {
   height: 40,
   cell_status: Array.from({ length: 40 }, () =>
     Array.from({ length: 40 }, () => "unvisited")
+  ),
+  hazard_types: Array.from({ length: 40 }, () =>
+    Array.from({ length: 40 }, () => "none")
   ),
 };
 
@@ -85,15 +89,21 @@ export default function GridMap({ missionStarted }: GridMapProps) {
     };
   }, []);
 
-  const cellClass = (status: string, x: number, y: number) => {
+  const cellClass = (status: string, hazardType: string, x: number, y: number) => {
     if (x === COMMAND_AGENT_BASE.x && y === COMMAND_AGENT_BASE.y) {
       return "bg-emerald-500";
     }
-    if (status === "suspect") {
+    if (status === "unconfirmed") {
       return "animate-pulse bg-orange-400";
     }
     if (status === "survivor_found" || status === "survivor") {
       return "bg-red-500";
+    }
+    if (hazardType === "heavy_smoke") {
+      return "bg-slate-200";
+    }
+    if (hazardType === "heavy_wind") {
+      return "bg-sky-200";
     }
     if (status === "clear") {
       return "bg-slate-700";
@@ -134,16 +144,29 @@ export default function GridMap({ missionStarted }: GridMapProps) {
   return (
     <section className="h-full rounded-2xl border border-slate-200 bg-white/70 p-5 shadow-sm backdrop-blur">
       <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-slate-900">GridMap</h2>
-        <span
-          className={`rounded-full px-3 py-1 text-xs font-medium ${
-            missionStarted
-              ? "bg-emerald-100 text-emerald-700"
-              : "bg-amber-100 text-amber-700"
-          }`}
-        >
-          {missionStarted ? "Mission Live" : "Awaiting Launch"}
-        </span>
+        <h2 className="text-lg font-semibold text-slate-900">Grid Map</h2>
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          <span className="flex items-center gap-1 text-xs text-slate-600">
+            <span className="inline-block h-3 w-3 rounded-sm bg-orange-400" />
+            Unconfirmed
+          </span>
+          <span className="flex items-center gap-1 text-xs text-slate-600">
+            <span className="inline-block h-3 w-3 rounded-sm bg-red-500" />
+            Survivor
+          </span>
+          <span className="flex items-center gap-1 text-xs text-slate-600">
+            <span className="inline-block h-3 w-3 rounded-sm bg-slate-700" />
+            Visited
+          </span>
+          <span className="flex items-center gap-1 text-xs text-slate-600">
+            <span className="inline-block h-3 w-3 rounded-sm bg-sky-200" />
+            Heavy Wind
+          </span>
+          <span className="flex items-center gap-1 text-xs text-slate-600">
+            <span className="inline-block h-3 w-3 rounded-sm bg-slate-200" />
+            Heavy Smoke
+          </span>
+        </div>
       </div>
 
       <div
@@ -166,10 +189,11 @@ export default function GridMap({ missionStarted }: GridMapProps) {
           {flattenedCells.map((status, index) => {
             const x = index % grid.width;
             const y = Math.floor(index / grid.width);
+            const hazardType = grid.hazard_types[y]?.[x] ?? "none";
             return (
               <div
                 key={`${index}-${status}`}
-                className={cellClass(status, x, y)}
+                className={cellClass(status, hazardType, x, y)}
                 onMouseEnter={(event) => {
                   setHoveredCell({ x, y });
                   updateHoverTooltipPosition(event.clientX, event.clientY);

@@ -107,12 +107,11 @@ def thermal_scan(drone_id: int) -> dict[str, Any]:
     # Keep the placeholder method invocation for simulation flow.
     drone.thermal_scan()
 
-    cell_weight = int(model.search_grid[drone.y, drone.x])
-    real_signature_detected = cell_weight >= 3
+    real_signature_detected = bool(model.has_survivor_signature(drone.x, drone.y))
     false_alarm = (not real_signature_detected) and (random.random() < 0.30)
     thermal_signature_detected = real_signature_detected or false_alarm
 
-    status = "suspect" if thermal_signature_detected else "clear"
+    status = "unconfirmed" if thermal_signature_detected else "clear"
     drone.last_scan_result = status
     model.update_shared_memory((drone.x, drone.y), status)
 
@@ -139,19 +138,19 @@ def thermal_scan(drone_id: int) -> dict[str, Any]:
 
 @mcp.tool()
 def verify_survivor(drone_id: int) -> dict[str, Any]:
-    """Run multimodal verification and confirm survivors in suspect cells only."""
+    """Run multimodal verification and confirm survivors in unconfirmed cells only."""
     model = get_active_model()
     drone = _get_drone_by_id(drone_id)
     position = (drone.x, drone.y)
 
-    # Verification is only valid on cells currently marked as suspect.
+    # Verification is only valid on cells currently marked as unconfirmed.
     cell_status = model.shared_memory.get(position, "clear")
-    if cell_status != "suspect":
+    if cell_status != "unconfirmed":
         return {
             "drone_id": drone_id,
             "position": [drone.x, drone.y],
             "status": "Not Confirmed",
-            "reason": "Cell is not marked suspect",
+            "reason": "Cell is not marked unconfirmed",
             "secondary_check_passed": False,
         }
 
