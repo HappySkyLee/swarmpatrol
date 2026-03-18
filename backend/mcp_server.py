@@ -1,38 +1,34 @@
 from __future__ import annotations
 
-import random
+import json
+import os
 from typing import Any
+from urllib import parse, request
 
 from fastmcp import FastMCP
 
-from engine import COMMAND_AGENT_ORIGIN, Drone, SwarmModel as Model
-
-
 mcp = FastMCP("swarm-intelligence")
-
-# Active simulation instance shared by MCP tools.
-_active_model: Model = Model(num_drones=4)
-_verified_survivors: set[tuple[int, int]] = set()
+BACKEND_BASE_URL = os.getenv("SWARM_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
+BACKEND_API_KEY = os.getenv("SWARM_BACKEND_API_KEY", "").strip()
 
 
-def get_active_model() -> Model:
-    """Return the active simulation model instance."""
-    return _active_model
+def _api_request(method: str, path: str, params: dict[str, Any] | None = None) -> Any:
+    query = parse.urlencode(params or {})
+    url = f"{BACKEND_BASE_URL}{path}"
+    if query:
+        url = f"{url}?{query}"
 
+    req = request.Request(url=url, method=method.upper())
+    req.add_header("Accept", "application/json")
+    if BACKEND_API_KEY:
+        req.add_header("X-API-Key", BACKEND_API_KEY)
 
-def set_active_model(model: Model) -> Model:
-    """Replace the active simulation model instance."""
-    global _active_model
-    _active_model = model
-    _verified_survivors.clear()
-    return _active_model
+    with request.urlopen(req, timeout=30) as response:
+        payload = response.read().decode("utf-8")
+        if not payload:
+            return None
+        return json.loads(payload)
 
-
-def _get_drone_by_id(drone_id: int) -> Drone:
-    model = get_active_model()
-    if not 0 <= drone_id < len(model.drones):
-        raise ValueError(f"drone_id must be between 0 and {len(model.drones) - 1}")
-    return model.drones[drone_id]
 
 
 @mcp.tool()
@@ -42,174 +38,60 @@ def list_active_drones() -> list[dict[str, Any]]:
     This scans the live simulation state at call time, so clients must call this
     tool first to discover which drone IDs are currently available.
     """
-    model = get_active_model()
-    active = []
-
-    for index, drone in enumerate(model.drones):
-        if drone.state != "active":
-            continue
-
-        active.append(
-            {
-                "id": int(index),
-                "status": drone.state,
-                "position": [drone.x, drone.y],
-                "battery": drone.battery,
-                "mode": drone.mode,
-            }
-        )
-
-    return active
+    result = _api_request("GET", "/agent/list_active_drones")
+    return result if isinstance(result, list) else []
 
 
 @mcp.tool()
 def move_to(drone_id: int, x: int, y: int) -> dict[str, int]:
     """Move a drone one step toward (x, y) and return its new coordinates."""
-    model = get_active_model()
-    width = model.search_grid.shape[1]
-    height = model.search_grid.shape[0]
-    if not (0 <= x < width and 0 <= y < height):
-        raise ValueError("Target coordinates are outside the search grid")
-
-    drone = _get_drone_by_id(drone_id)
-    if drone.state == "failed" or drone.battery <= 0:
-        raise RuntimeError("Hardware Failure")
-
-    # A move step always costs exactly 1% battery. If this step would deplete
-    # battery to 0%, report hardware failure and do not execute the move.
-    if drone.battery == 1:
-        drone.battery = 0
-        drone.state = "failed"
-        raise RuntimeError("Hardware Failure")
-
-    battery_before = drone.battery
-    new_x, new_y = drone.move_to((x, y))
-
-    if battery_before - drone.battery != 1:
-        raise RuntimeError("Battery accounting error: expected exactly 1% per move")
-
-    return {"x": new_x, "y": new_y}
+    result = _api_request("POST", "/agent/move_to", {"drone_id": drone_id, "x": x, "y": y})
+    if not isinstance(result, dict):
+        raise RuntimeError("Invalid response from backend /agent/move_to")
+    return {"x": int(result.get("x", 0)), "y": int(result.get("y", 0))}
 
 
 @mcp.tool()
 def get_battery_status(drone_id: int) -> int:
     """Return the battery level for a specific drone."""
-    drone = _get_drone_by_id(drone_id)
-    return drone.battery
+    result = _api_request("GET", "/agent/get_battery_status", {"drone_id": drone_id})
+    return int(result)
 
 
 @mcp.tool()
 def thermal_scan(drone_id: int) -> dict[str, Any]:
     """Scan the current cell with false-alarm uncertainty and verification metadata."""
-    model = get_active_model()
-    drone = _get_drone_by_id(drone_id)
-
-    # Keep the placeholder method invocation for simulation flow.
-    drone.thermal_scan()
-
-    real_signature_detected = bool(model.has_survivor_signature(drone.x, drone.y))
-    false_alarm = (not real_signature_detected) and (random.random() < 0.30)
-    thermal_signature_detected = real_signature_detected or false_alarm
-
-    status = "unconfirmed" if thermal_signature_detected else "clear"
-    drone.last_scan_result = status
-    model.update_shared_memory((drone.x, drone.y), status)
-
-    result: dict[str, Any] = {
-        "drone_id": drone_id,
-        "position": [drone.x, drone.y],
-        "status": status,
-        "thermal_signature_detected": thermal_signature_detected,
-        "false_alarm_probability": 0.30,
-        "false_alarm_triggered": false_alarm,
-    }
-
-    if thermal_signature_detected:
-        result["verification_required"] = True
-        result["verification_note"] = (
-            "Thermal signature detected. Requires multimodal verification "
-            "(sound/shape) from a second drone."
-        )
-    else:
-        result["verification_required"] = False
-
+    result = _api_request("POST", "/agent/thermal_scan", {"drone_id": drone_id})
+    if not isinstance(result, dict):
+        raise RuntimeError("Invalid response from backend /agent/thermal_scan")
     return result
 
 
 @mcp.tool()
 def verify_survivor(drone_id: int) -> dict[str, Any]:
     """Run multimodal verification and confirm survivors in unconfirmed cells only."""
-    model = get_active_model()
-    drone = _get_drone_by_id(drone_id)
-    position = (drone.x, drone.y)
-
-    # Verification is only valid on cells currently marked as unconfirmed.
-    cell_status = model.shared_memory.get(position, "clear")
-    if cell_status != "unconfirmed":
-        return {
-            "drone_id": drone_id,
-            "position": [drone.x, drone.y],
-            "status": "Not Confirmed",
-            "reason": "Cell is not marked unconfirmed",
-            "secondary_check_passed": False,
-        }
-
-    # Simulated multimodal signals from secondary verification.
-    multimodal = {
-        "temperature": random.random() < 0.75,
-        "sound": random.random() < 0.60,
-        "shape": random.random() < 0.65,
-    }
-    positive_count = sum(1 for detected in multimodal.values() if detected)
-    secondary_check_passed = positive_count >= 2
-
-    status = "Confirmed Survivor" if secondary_check_passed else "Not Confirmed"
-    if status == "Confirmed Survivor":
-        _verified_survivors.add(position)
-
-    return {
-        "drone_id": drone_id,
-        "position": [drone.x, drone.y],
-        "status": status,
-        "secondary_check_passed": secondary_check_passed,
-        "multimodal": multimodal,
-    }
+    result = _api_request("POST", "/agent/verify_survivor", {"drone_id": drone_id})
+    if not isinstance(result, dict):
+        raise RuntimeError("Invalid response from backend /agent/verify_survivor")
+    return result
 
 
 @mcp.tool()
 def plan_human_rescue_route(x: int, y: int) -> dict[str, Any]:
     """Plan A* rescue-team route from base (20,20) to a verified survivor."""
-    model = get_active_model()
-    width = model.search_grid.shape[1]
-    height = model.search_grid.shape[0]
-    if not (0 <= x < width and 0 <= y < height):
-        raise ValueError("Survivor coordinates are outside the search grid")
-
-    destination = (x, y)
-    if destination not in _verified_survivors:
-        raise ValueError("Route denied: survivor at this location is not verified")
-
-    path, total_cost = model.find_path(COMMAND_AGENT_ORIGIN, destination)
-    return {
-        "status": "Human Rescue Route Ready",
-        "from": [COMMAND_AGENT_ORIGIN[0], COMMAND_AGENT_ORIGIN[1]],
-        "to": [x, y],
-        "path": [[px, py] for px, py in path],
-        "total_cost": int(total_cost),
-        "algorithm": "A*",
-    }
+    result = _api_request("GET", "/agent/plan_human_rescue_route", {"x": x, "y": y})
+    if not isinstance(result, dict):
+        raise RuntimeError("Invalid response from backend /agent/plan_human_rescue_route")
+    return result
 
 
 @mcp.tool()
 def simulation_status() -> dict[str, Any]:
     """Return core state for the active simulation instance."""
-    model = get_active_model()
-    return {
-        "round": model.round_count,
-        "elapsed_minutes": model.elapsed_minutes,
-        "num_drones": len(model.drones),
-        "active_drones": sum(1 for d in model.drones if d.state == "active"),
-    }
+    result = _api_request("GET", "/agent/simulation_status")
+    if not isinstance(result, dict):
+        raise RuntimeError("Invalid response from backend /agent/simulation_status")
+    return result
 
 
 @mcp.tool()
@@ -217,30 +99,17 @@ def step_simulation(rounds: int = 1) -> dict[str, Any]:
     """Advance the active simulation by N rounds."""
     if rounds < 1:
         raise ValueError("rounds must be >= 1")
-
-    model = get_active_model()
-    for _ in range(rounds):
-        model.step()
-
-    return simulation_status()
+    result = _api_request("POST", "/agent/step_simulation", {"rounds": rounds})
+    if not isinstance(result, dict):
+        raise RuntimeError("Invalid response from backend /agent/step_simulation")
+    return result
 
 
 @mcp.tool()
 def list_drones() -> list[dict[str, Any]]:
     """Return per-drone snapshot data from the active model."""
-    model = get_active_model()
-    drones: list[Drone] = model.drones
-    return [
-        {
-            "id": index,
-            "position": [drone.x, drone.y],
-            "battery": drone.battery,
-            "mode": drone.mode,
-            "state": drone.state,
-            "last_scan_result": drone.last_scan_result,
-        }
-        for index, drone in enumerate(drones)
-    ]
+    result = _api_request("GET", "/agent/list_drones")
+    return result if isinstance(result, list) else []
 
 
 if __name__ == "__main__":

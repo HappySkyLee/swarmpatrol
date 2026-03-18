@@ -31,10 +31,6 @@ type SurvivorsResponse = {
   survivors: Survivor[];
 };
 
-type GridStateResponse = {
-  cell_status: string[][];
-};
-
 const BACKEND_BASE_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
@@ -63,8 +59,6 @@ export default function Home() {
   const [completedMinutes, setCompletedMinutes] = useState<number | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const missionCompletedLoggedRef = useRef(false);
-  const previousTelemetryRef = useRef<Map<number, Telemetry>>(new Map());
-  const previousDroneScanStatusRef = useRef<Map<number, string>>(new Map());
 
   const withTimestamp = (line: string) => {
     const now = new Date();
@@ -76,14 +70,6 @@ export default function Home() {
 
   const prependLog = (line: string) => {
     setLogs((prev) => [withTimestamp(line), ...prev].slice(0, 100));
-  };
-
-  const prependLogs = (lines: string[]) => {
-    if (lines.length === 0) {
-      return;
-    }
-    const stamped = lines.map((line) => withTimestamp(line));
-    setLogs((prev) => [...stamped.reverse(), ...prev].slice(0, 100));
   };
 
   useEffect(() => {
@@ -121,80 +107,12 @@ export default function Home() {
 
   const fetchTelemetry = async (logErrors = false) => {
     try {
-      const [telemetryResponse, gridStateResponse] = await Promise.all([
-        fetch(`${BACKEND_BASE_URL}/drone_telemetry`),
-        fetch(`${BACKEND_BASE_URL}/grid_state`),
-      ]);
+      const telemetryResponse = await fetch(`${BACKEND_BASE_URL}/drone_telemetry`);
 
       if (!telemetryResponse.ok) {
         throw new Error(`Telemetry request failed (${telemetryResponse.status})`);
       }
       const data = (await telemetryResponse.json()) as Telemetry[];
-      const gridState = gridStateResponse.ok
-        ? ((await gridStateResponse.json()) as GridStateResponse)
-        : null;
-
-      const nextTelemetryMap = new Map<number, Telemetry>();
-      const nextDroneScanStatusMap = new Map<number, string>();
-      for (const drone of data) {
-        nextTelemetryMap.set(drone.drone_id, drone);
-      }
-
-      if (previousTelemetryRef.current.size > 0) {
-        const droneActivityLines: string[] = [];
-
-        const ordered = [...data].sort((a, b) => a.drone_id - b.drone_id);
-        for (const drone of ordered) {
-          const previous = previousTelemetryRef.current.get(drone.drone_id);
-          if (!previous) {
-            continue;
-          }
-
-          const actionParts: string[] = [];
-          if (previous.x !== drone.x || previous.y !== drone.y) {
-            actionParts.push(
-              `moved (${previous.x},${previous.y}) -> (${drone.x},${drone.y})`
-            );
-          }
-          if (previous.mode !== drone.mode) {
-            actionParts.push(`mode ${previous.mode} -> ${drone.mode}`);
-          }
-
-          const scanStatus = gridState?.cell_status?.[drone.y]?.[drone.x];
-          if (scanStatus) {
-            nextDroneScanStatusMap.set(drone.drone_id, scanStatus);
-            const previousScanStatus = previousDroneScanStatusRef.current.get(drone.drone_id);
-            const isScanEvent =
-              scanStatus === "clear" || scanStatus === "unconfirmed" || scanStatus === "survivor";
-
-            if (isScanEvent && ((previous.x !== drone.x || previous.y !== drone.y) || previousScanStatus !== scanStatus)) {
-              actionParts.push(`scan ${scanStatus} at (${drone.x},${drone.y})`);
-            }
-          }
-
-          if (actionParts.length > 0) {
-            droneActivityLines.push(
-              `[drone ${drone.drone_id}] ${actionParts.join(" | ")} | battery ${
-                drone.battery_percentage
-              }%`
-            );
-          }
-        }
-
-        if (droneActivityLines.length > 0) {
-          prependLogs(droneActivityLines);
-        }
-      } else {
-        for (const drone of data) {
-          const scanStatus = gridState?.cell_status?.[drone.y]?.[drone.x];
-          if (scanStatus) {
-            nextDroneScanStatusMap.set(drone.drone_id, scanStatus);
-          }
-        }
-      }
-
-      previousTelemetryRef.current = nextTelemetryMap;
-      previousDroneScanStatusRef.current = nextDroneScanStatusMap;
       setTelemetry(data);
     } catch (error) {
       if (logErrors) {

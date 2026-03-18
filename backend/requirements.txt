@@ -3,6 +3,7 @@ uvicorn
 fastmcp
 langchain
 langchain-core
+langchain-google-genai
 langchain-openai
 langchain-classic
 langchain-mcp-adapters

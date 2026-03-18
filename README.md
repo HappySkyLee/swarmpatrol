@@ -47,6 +47,23 @@ cd backend
 ```
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
+
+## Backend configuration (Manus + MCP command auth)
+1. Copy `backend/.env.example` to `backend/.env`.
+2. Set `AGENT_LLM_PROVIDER=manus`.
+3. Fill Manus settings:
+	- `MANUS_API_KEY`
+	- `MANUS_BASE_URL` (OpenAI-compatible base URL, default `https://api.manus.im/v1`)
+	- `MANUS_MODEL`
+4. Protect command endpoints by setting:
+	- `BACKEND_API_KEY` (validated on `/agent/*`)
+	- `SWARM_BACKEND_API_KEY` (used by MCP tool calls; should match `BACKEND_API_KEY`)
+5. Start backend from `backend/` so `.env` is loaded by `python-dotenv`.
+
+Notes:
+- To switch back to Gemini, set `AGENT_LLM_PROVIDER=gemini` and provide `GEMINI_API_KEY` (or `GOOGLE_API_KEY` / `AGENT_API_KEY`).
+- `/agent/*` routes return `401` if `X-API-Key` is invalid and `503` if `BACKEND_API_KEY` is not configured.
+- Manus OpenAI-compatible auth uses `API_KEY` request header; backend passes your `MANUS_API_KEY` as this header automatically.
  
 
 ## __Tech Stack:__    
