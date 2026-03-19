@@ -46,26 +46,77 @@ def _normalize_manus_base_url(base_url: str) -> str:
 
 
 SYSTEM_PROMPT = (
-    '''You are the central "Command Agent" orchestrating a Decentralised Swarm of 3 to 5 first-responder drones. 
-Your base is located at coordinates (20,20) on a 41x41 grid. 
+        '''You are the Command Agent for the Swarmpatrol disaster-response simulation.
 
-Your mission is to autonomously map the disaster zone, locate survivors, and manage drone resources without human intervention.
+Your primary responsibility is to coordinate a drone swarm safely and efficiently, and to provide accurate operator-facing technical interface guidance when asked.
 
-### CRITICAL ENVIRONMENT PHYSICS:
-1. Turn & Movement: The environment operates in rounds (1 round = 1 minute). A drone can move exactly 1 step and perform 1 thermal scan per round.
-2. Battery Drain: Moving 1 step or operating for 1 minute consumes 1 percent of a drone's battery.
-3. Charging: Simulated charging takes 30 minutes. You MUST monitor batteries and recall drones to (20,20) before they reach 0 percent.for each other to reach the outer edges of the grid.
-4. Verification: A positive thermal scan has a 30 percent of chance of being a false alarm. If a cell is marked "unconfirmed", you must assign other drone to perform thermal scan to confirm the survivor.
+=== OPERATIONAL CONTEXT ===
+- Simulation world: grid-based environment with base at (20,20).
+- Typical active drones: 4 to 5 drones.
+- Round model: one action step advances mission time and affects battery.
+- Survivor workflow: thermal detections are probabilistic; unconfirmed cells require secondary verification.
 
-### MANDATORY AGENTIC REASONING (CHAIN-OF-THOUGHT):
-Before you execute ANY tool call (like move_to or thermal_scan), you MUST output your logical reasoning. 
-Example: "Drone 1 has 85 percent battery and is at (22,25). I am sending it to (22,26) because that cell is unvisited and it has enough battery to make the round trip. Drone 2 is at (20,22) acting as a signal relay."
+=== SOURCE OF TRUTH FOR CONTROL INTERFACE ===
+Use the following as the canonical interface details for this project.
 
-### MISSION START:
-1. Use your tools to discover the active drones on the network.
-2. Check their initial battery statuses.
-3. Formulate an initial A* exploration pattern.
-4. Begin dispatching the drones to unvisited cells.'''
+1) HTTP/REST API (backend control plane)
+- Base URL: value of SWARM_BACKEND_URL (default: http://127.0.0.1:8000).
+- Authentication: X-API-Key header required for /agent/* routes.
+    - Backend expects BACKEND_API_KEY.
+    - MCP bridge sends SWARM_BACKEND_API_KEY as X-API-Key.
+- Core endpoints:
+    - GET /agent/list_active_drones
+    - POST /agent/move_to?drone_id=<int>&x=<int>&y=<int>
+    - GET /agent/get_battery_status?drone_id=<int>
+    - POST /agent/thermal_scan?drone_id=<int>
+    - POST /agent/verify_survivor?drone_id=<int>
+    - GET /agent/plan_human_rescue_route?x=<int>&y=<int>
+    - GET /agent/simulation_status
+    - POST /agent/step_simulation?rounds=<int>
+    - GET /agent/list_drones
+
+2) Command-line interface
+- Backend server: uvicorn main:app --host 0.0.0.0 --port 8000
+- MCP tool server: python mcp_server.py
+- Recommendation: prefer MCP/Python tool functions for mission control, not raw shell commands for per-drone actions.
+
+3) Python module / tool interface
+- Module: mcp_server.py exposes callable tool functions:
+    - list_active_drones()
+    - move_to(drone_id, x, y)
+    - get_battery_status(drone_id)
+    - thermal_scan(drone_id)
+    - verify_survivor(drone_id)
+    - plan_human_rescue_route(x, y)
+    - simulation_status()
+    - step_simulation(rounds=1)
+    - list_drones()
+
+4) Simulation initialization/configuration
+- Defined in engine.py:
+    - COMMAND_AGENT_ORIGIN = (20, 20)
+    - GRID_WIDTH = 40, GRID_HEIGHT = 40
+    - SwarmModel(num_drones=4) is default backend initialization
+    - Drone battery starts at 100
+
+=== REQUIRED ANSWERING RULES ===
+When asked interface questions (API/auth, CLI, Python module, config, tool names, discovery, response format), answer concretely using the above details.
+
+Your answer must explicitly include:
+1. Exact API or tool interface names.
+2. Whether to use shell commands, Python scripts, or dedicated API/tool functions (prefer dedicated functions for drone actions).
+3. Drone ID discovery guidance (call list_active_drones() first; do not hardcode IDs).
+4. Expected response formats (JSON objects/lists from API and tool calls).
+
+=== RESPONSE FORMAT EXPECTATIONS ===
+- Keep responses concise, technical, and action-oriented.
+- Do not invent endpoints, function names, auth methods, or schema fields not defined above.
+- If a value is environment-dependent, state both env var name and default value when available.
+
+=== MISSION EXECUTION POLICY ===
+- Before dispatching movement or scans, reason about battery safety and verification requirements.
+- Prioritize: discover active drones -> inspect battery -> explore unvisited cells -> verify unconfirmed detections -> plan rescue routes for confirmed survivors.
+'''
 )
 
 
@@ -210,14 +261,14 @@ UNCONFIRMED_TRIAGE_POLICY = (
     "5) Only call verify_survivor after documenting why verification is now justified."
 )
 
-
 HUMAN_RESCUE_ROUTING_POLICY = (
-    "Human Rescue Routing policy:\n"
-    "1) If verify_survivor returns Confirmed Survivor, do not end the turn immediately.\n"
-    "2) Call plan_human_rescue_route(x, y) for the confirmed location in the same decision cycle.\n"
-    f"3) Ensure the route is A*-based and originates from base ({COMMAND_BASE_X},{COMMAND_BASE_Y}).\n"
-    "4) Report route readiness, path cost, and handoff instructions for human rescue teams."
+    "Human rescue routing policy:\n"
+    "1) Plan route only for confirmed survivors.\n"
+    "2) Before planning, ensure target cell is confirmed and stable.\n"
+    "3) Use plan_human_rescue_route(x, y) with confirmed coordinates.\n"
+    "4) Avoid repeated route planning for the same destination unless mission state changed."
 )
+
 
 
 async def _load_mcp_tools(server_script: str = "mcp_server.py") -> list[Any]:
@@ -400,7 +451,6 @@ class CommandAgentOrchestrator:
         self.manus_tool_map: dict[str, Any] = {}
         self.manus_poll_interval_seconds = float(os.getenv("MANUS_POLL_INTERVAL_SECONDS", "1.5"))
         self.manus_poll_timeout_seconds = float(os.getenv("MANUS_POLL_TIMEOUT_SECONDS", "30"))
-        self.gemini_llm: ChatGoogleGenerativeAI | None = None  # For Manus tool execution fallback
 
         if self.provider == "manus":
             manus_api_key = _first_non_empty_env("MANUS_API_KEY", "AGENT_API_KEY")
@@ -425,8 +475,6 @@ class CommandAgentOrchestrator:
             self.manus_model = manus_model
             self.manus_tools = _run_coroutine_sync(_load_mcp_tools(server_script=server_script))
             self.manus_tool_map = {str(getattr(tool, "name", "")): tool for tool in self.manus_tools}
-            # Gemini LLM will be lazy-initialized for tool execution when needed
-            self.gemini_llm = None
         else:
             self.executor = create_orchestrator(server_script=server_script)
 
@@ -510,7 +558,17 @@ class CommandAgentOrchestrator:
         global_plan = str(payload.get("global_search_plan", ""))
         triage_policy = str(payload.get("unconfirmed_triage_policy", ""))
         routing_policy = str(payload.get("human_rescue_routing_policy", ""))
-        
+        available_tools: list[str] = []
+        for tool_name, tool in self.manus_tool_map.items():
+            description = str(getattr(tool, "description", "")).strip()
+            schema = getattr(tool, "tool_call_schema", None)
+            args_schema = schema if isinstance(schema, dict) else {}
+            available_tools.append(
+                f"- {tool_name}: {description} | args_schema={json.dumps(args_schema, ensure_ascii=False)}"
+            )
+
+        tools_text = "\n".join(available_tools) if available_tools else "- No tools available"
+
         return (
             f"{SYSTEM_PROMPT}\n\n"
             f"Shared Memory Context:\n{shared_memory_context}\n\n"
@@ -518,9 +576,32 @@ class CommandAgentOrchestrator:
             f"Decision Policy:\n{triage_policy}\n\n"
             f"Mission State Policy:\n{routing_policy}\n\n"
             f"Operator Objective:\n{user_input}\n\n"
-            "Provide clear reasoning about what actions should be taken next. "
-            "Be concise and focus on logic, not tool calls. "
-            "(Tool execution will be delegated to another agent.)"
+            "Runtime assumptions (must follow):\n"
+            "- You are already connected to the Swarmpatrol runtime through callable tools.\n"
+            "- Do NOT ask for project paths, file uploads, sandbox access, setup steps, or backend URL confirmation.\n"
+            "- Do NOT claim you cannot locate files; filesystem access is irrelevant for this task.\n"
+            "- Use only the provided tools as your interface to the swarm.\n\n"
+            "You must autonomously choose actions (move/scan/verify/route) based on your own reasoning. "
+            "Do not ask the operator any questions. Do not request more input.\n\n"
+            "Available callable tools:\n"
+            f"{tools_text}\n\n"
+            "Return ONLY valid JSON with this exact schema (no markdown, no prose outside JSON):\n"
+            "{\n"
+            '  "thought": "short internal reasoning",\n'
+            '  "actions": [\n'
+            '    {"tool": "tool_name", "args": {"arg": "value"}}\n'
+            "  ],\n"
+            '  "final": "operator-facing summary"\n'
+            "}\n"
+            "Rules:\n"
+            "- Execute mission progression autonomously using tools.\n"
+            "- Prefer concrete movement and scanning actions when safe.\n"
+            "- Max 4 actions.\n"
+            "- Every action.tool must be from the available tool list.\n"
+            "- Every action.args must match tool schema.\n"
+            "- If no action is needed, return actions as [].\n"
+            "- Never output questions.\n"
+            "- Never output requests for paths/files/sandbox/backend confirmation."
         )
 
     def _parse_manus_action_payload(self, output_text: str) -> dict[str, Any]:
@@ -550,6 +631,74 @@ class CommandAgentOrchestrator:
             "final": raw,
         }
 
+    @staticmethod
+    def _looks_like_filesystem_refusal(text: str) -> bool:
+        lowered = text.lower()
+        signals = [
+            "cannot locate",
+            "project files",
+            "sandbox",
+            "provide the path",
+            "initialize/download",
+            "backend is already running",
+            "once i have access",
+        ]
+        return any(signal in lowered for signal in signals)
+
+    def _fallback_autonomous_actions(self) -> dict[str, Any]:
+        return {
+            "thought": "Starting mission autonomously via tool interface; discovering drones and validating battery before movement/scan.",
+            "actions": [
+                {"tool": "list_active_drones", "args": {}},
+            ],
+            "final": "Initialized autonomous control via tool API and started drone discovery.",
+        }
+
+    def _execute_tools_from_actions(
+        self,
+        actions: Any,
+        thought: str,
+    ) -> list[tuple[ManusToolAction, Any]]:
+        """Execute tool actions produced by Manus JSON output."""
+        intermediate_steps: list[tuple[ManusToolAction, Any]] = []
+        if not isinstance(actions, list):
+            return intermediate_steps
+
+        for action_item in actions[:4]:
+            if not isinstance(action_item, dict):
+                continue
+
+            tool_name = str(action_item.get("tool", "")).strip()
+            args = action_item.get("args", {})
+            if not isinstance(args, dict):
+                args = {}
+
+            action = ManusToolAction(
+                tool=tool_name,
+                tool_input=args,
+                log=thought or f"Calling {tool_name} with {args}",
+            )
+
+            tool_ref = self.manus_tool_map.get(tool_name)
+            if tool_ref is None:
+                observation = {
+                    "error": f"Unknown tool '{tool_name}'",
+                    "available_tools": sorted(self.manus_tool_map.keys()),
+                }
+                intermediate_steps.append((action, observation))
+                continue
+
+            try:
+                observation = _run_coroutine_sync(tool_ref.ainvoke(args))
+            except Exception as exc:
+                observation = {
+                    "error": f"Tool execution failed for '{tool_name}': {type(exc).__name__}: {exc}"
+                }
+
+            intermediate_steps.append((action, observation))
+
+        return intermediate_steps
+
     def _extract_manus_output_text(self, response_obj: Any) -> str:
         output = getattr(response_obj, "output", None)
         if isinstance(output, list):
@@ -578,96 +727,6 @@ class CommandAgentOrchestrator:
             return output_text.strip()
 
         return ""
-
-    def _lazy_init_gemini(self) -> ChatGoogleGenerativeAI | None:
-        """Initialize Gemini LLM on-demand if not already initialized."""
-        if self.gemini_llm is not None:
-            return self.gemini_llm
-        
-        try:
-            gemini_api_key = None
-            for key_name in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "AGENT_API_KEY"]:
-                candidate = os.getenv(key_name, "").strip()
-                if candidate:
-                    gemini_api_key = candidate
-                    break
-            
-            if not gemini_api_key:
-                raise RuntimeError("Gemini API key not available. Set GEMINI_API_KEY or GOOGLE_API_KEY.")
-            
-            self.gemini_llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
-                temperature=0.1,
-                api_key=gemini_api_key,
-            )
-            return self.gemini_llm
-        except Exception as e:
-            print(f"Warning: Could not initialize Gemini for tool execution: {e}")
-            return None
-
-    def _execute_tools_with_gemini(
-        self, manus_reasoning: str, payload: dict[str, Any]
-    ) -> list[tuple[ManusToolAction, Any]]:
-        """Use Gemini to interpret Manus reasoning and execute appropriate tools."""
-        gemini_llm = self._lazy_init_gemini()
-        if gemini_llm is None or not self.manus_tools:
-            return []
-
-        try:
-            user_input = str(payload.get("input", ""))
-            shared_memory = str(payload.get("shared_memory_context", ""))
-
-            system_msg = (
-                f"{SYSTEM_PROMPT}\n\n"
-                f"Shared Memory:\n{shared_memory}\n\n"
-                f"Previous AI Reasoning:\n{manus_reasoning}\n\n"
-                "Based on the reasoning above, decide which tools to call and execute them.\n"
-                "Be concise and call 1-4 tools maximum."
-            )
-
-            # Create an AgentExecutor temporarily for tool calling
-            gemini_tools = self.manus_tools
-            prompt = ChatPromptTemplate.from_messages(
-                [
-                    ("system", system_msg),
-                    ("human", user_input),
-                    ("placeholder", "{agent_scratchpad}"),
-                ]
-            )
-
-            agent = create_tool_calling_agent(llm=gemini_llm, tools=gemini_tools, prompt=prompt)
-            executor = AgentExecutor(
-                agent=agent,
-                tools=gemini_tools,
-                max_iterations=2,
-                return_intermediate_steps=True,
-                verbose=False,
-            )
-
-            context = {
-                "shared_memory_context": shared_memory,
-                "input": user_input,
-            }
-            result = executor.invoke(context)
-            intermediate_steps = result.get("intermediate_steps", [])
-
-            # Convert to ManusToolAction format for streaming
-            converted_steps: list[tuple[ManusToolAction, Any]] = []
-            for action, observation in intermediate_steps:
-                tool_name = getattr(action, "tool", "unknown")
-                tool_input = getattr(action, "tool_input", {})
-                action_obj = ManusToolAction(
-                    tool=tool_name,
-                    tool_input=tool_input,
-                    log=f"Gemini executed: {tool_name}",
-                )
-                converted_steps.append((action_obj, observation))
-
-            return converted_steps
-
-        except Exception as e:
-            print(f"Error during Gemini tool execution: {e}")
-            return []
 
     def _invoke_manus(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.manus_client is None or self.manus_model is None:
@@ -741,16 +800,23 @@ class CommandAgentOrchestrator:
         if task_url:
             output_text = f"{output_text}\nTask URL: {task_url}"
 
-        # Manus provides reasoning; use Gemini to execute tools based on this reasoning
-        manus_reasoning = output_text
-        intermediate_steps = self._execute_tools_with_gemini(manus_reasoning, payload)
+        parsed = self._parse_manus_action_payload(output_text)
+        if self._looks_like_filesystem_refusal(output_text):
+            parsed = self._fallback_autonomous_actions()
+        thought = str(parsed.get("thought", "")).strip()
+        actions = parsed.get("actions", [])
+        final = str(parsed.get("final", "")).strip()
+
+        intermediate_steps = self._execute_tools_from_actions(actions=actions, thought=thought)
+        output_summary = final or output_text or "Manus returned no final summary."
 
         return {
-            "output": manus_reasoning,
+            "output": output_summary,
             "intermediate_steps": intermediate_steps,
             "manus_task_id": task_id,
             "manus_status": status,
-            "manus_reasoning": manus_reasoning,  # Include for streaming display
+            "manus_reasoning": thought,
+            "manus_json": parsed,
         }
 
     def _iter_with_retry(self, payload: dict[str, Any]):
@@ -767,6 +833,7 @@ class CommandAgentOrchestrator:
             "steps": intermediate_steps,
             "output": result.get("output", ""),
             "manus_reasoning": result.get("manus_reasoning", ""),  # Pass through Manus reasoning if available
+            "manus_json": result.get("manus_json", {}),
         }
 
     def _ingest_tool_results(self, intermediate_steps: list[Any]) -> None:
@@ -871,6 +938,12 @@ class CommandAgentOrchestrator:
                         "reasoning": chunk["manus_reasoning"],
                         "provider": "manus",
                     },
+                }
+
+            if "manus_json" in chunk and isinstance(chunk["manus_json"], dict):
+                yield {
+                    "event": "manus_json",
+                    "data": chunk["manus_json"],
                 }
 
             if "actions" in chunk:
