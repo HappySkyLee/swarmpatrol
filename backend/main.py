@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import threading
 
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi import Header
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 
-# Load .env file so OPENAI_API_KEY and other secrets are available before AI init.
-load_dotenv()
+# Load backend/.env so OPENAI_API_KEY and other secrets are available before AI init.
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
-from engine import CELL_SIZE_METERS, SwarmModel as Model
+from engine import CELL_SIZE_METERS, COMMAND_AGENT_ORIGIN, SwarmModel as Model
 
 try:
     from agent_orchestrator import CommandAgentOrchestrator
@@ -66,6 +68,7 @@ stop_simulation_event = threading.Event()
 simulation_thread: threading.Thread | None = None
 SIMULATION_STEP_SECONDS = float(os.getenv("SIMULATION_STEP_SECONDS", "0.3"))
 survivor_registry: dict[tuple[int, int], dict[str, int | str]] = {}
+verified_survivor_positions: set[tuple[int, int]] = set()
 
 
 def _ensure_simulation_running() -> None:
@@ -113,6 +116,7 @@ def _reset_mission_state() -> None:
         model = Model(num_drones=4)
 
     survivor_registry.clear()
+    verified_survivor_positions.clear()
 
     new_orchestrator, orchestrator_error = _create_orchestrator_or_capture_error()
     orchestrator = new_orchestrator
@@ -205,6 +209,25 @@ def _simulation_loop() -> None:
                 stop_simulation_event.set()
 
 
+def _require_backend_api_key(x_api_key: str | None) -> None:
+    expected = os.getenv("BACKEND_API_KEY", "")
+    if not expected:
+        return
+    if x_api_key is None or x_api_key == "":
+        return
+    if x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def _resolve_drone(drone_id: int):
+    for index, drone in enumerate(model.drones):
+        unique_id = int(getattr(drone, "unique_id", index))
+        if drone_id in {index, unique_id, index + 1}:
+            return index, drone, unique_id
+
+    raise HTTPException(status_code=404, detail=f"Unknown drone_id: {drone_id}")
+
+
 @app.on_event("startup")
 def _startup_simulation_controller() -> None:
     _ensure_simulation_running()
@@ -227,6 +250,8 @@ def health() -> dict[str, object]:
     with simulation_lock:
         round_count = int(model.round_count)
         elapsed_minutes = int(model.elapsed_minutes)
+        num_drones = int(len(model.drones))
+        active_drones = int(sum(1 for drone in model.drones if getattr(drone, "state", "") == "active"))
         mission_phase = str(getattr(model, "mission_phase", "searching"))
         mission_completed = bool(getattr(model, "mission_completed", False))
         completed_round = getattr(model, "completed_round", None)
@@ -247,6 +272,8 @@ def health() -> dict[str, object]:
         ),
         "round": round_count,
         "elapsed_minutes": elapsed_minutes,
+        "num_drones": num_drones,
+        "active_drones": active_drones,
         "step_interval_seconds": SIMULATION_STEP_SECONDS,
     }
 
@@ -257,8 +284,10 @@ def start_mission() -> dict[str, object]:
     _ensure_simulation_running()
     active_orchestrator = _require_orchestrator()
     planning_prompt = (
-        "Start high-level mission planning from base (20,20). "
-        "Discover active drones and produce the initial search-and-rescue plan."
+        "Start mission from base (20,20) and continue until all cells in the 40x40 grid are scanned. "
+        "Use MCP tools only. Discover active drones first, then assign the 4 drones to four search directions: "
+        "north, south, east, and west (one primary direction per drone). "
+        "Then repeatedly move_to and thermal_scan across unscanned cells while managing battery-aware assignments."
     )
     planning_result = active_orchestrator.invoke(planning_prompt)
 
@@ -396,13 +425,217 @@ def drone_telemetry() -> list[dict[str, object]]:
     return telemetry
 
 
+@app.get("/agent/active_drones")
+def agent_active_drones(x_api_key: str | None = Header(default=None, alias="X-API-Key")):
+    _require_backend_api_key(x_api_key)
+
+    active: list[dict[str, object]] = []
+    with simulation_lock:
+        for index, drone in enumerate(model.drones):
+            if drone.state != "active":
+                continue
+            unique_id = int(getattr(drone, "unique_id", index))
+            active.append(
+                {
+                    "id": unique_id,
+                    "status": drone.state,
+                    "position": [int(drone.x), int(drone.y)],
+                    "battery": int(drone.battery),
+                    "mode": str(drone.mode),
+                }
+            )
+
+    return active
+
+
+@app.get("/agent/battery/{drone_id}")
+def agent_battery(drone_id: int, x_api_key: str | None = Header(default=None, alias="X-API-Key")):
+    _require_backend_api_key(x_api_key)
+
+    with simulation_lock:
+        _, drone, _ = _resolve_drone(drone_id)
+        return {"drone_id": drone_id, "battery": int(drone.battery)}
+
+
+@app.post("/agent/move_to")
+def agent_move_to(
+    payload: dict[str, int],
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+):
+    _require_backend_api_key(x_api_key)
+
+    try:
+        drone_id = int(payload["drone_id"])
+        x = int(payload["x"])
+        y = int(payload["y"])
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid payload: {exc}") from exc
+
+    with simulation_lock:
+        width = model.search_grid.shape[1]
+        height = model.search_grid.shape[0]
+        if not (0 <= x < width and 0 <= y < height):
+            raise HTTPException(status_code=400, detail="Target coordinates are outside the search grid")
+
+        _, drone, _ = _resolve_drone(drone_id)
+        if drone.state == "failed" or drone.battery <= 0:
+            raise HTTPException(status_code=400, detail="Hardware Failure")
+
+        if drone.battery == 1:
+            drone.battery = 0
+            drone.state = "failed"
+            raise HTTPException(status_code=400, detail="Hardware Failure")
+
+        battery_before = int(drone.battery)
+        new_x, new_y = drone.move_to((x, y), constrain_to_assigned_zone=False, avoid_unconfirmed=False)
+
+        if battery_before - int(drone.battery) != 1:
+            raise HTTPException(status_code=500, detail="Battery accounting error: expected exactly 1% per move")
+
+        return {"x": int(new_x), "y": int(new_y)}
+
+
+@app.post("/agent/thermal_scan")
+def agent_thermal_scan(
+    payload: dict[str, int],
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+):
+    _require_backend_api_key(x_api_key)
+
+    try:
+        drone_id = int(payload["drone_id"])
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid payload: {exc}") from exc
+
+    with simulation_lock:
+        _, drone, _ = _resolve_drone(drone_id)
+
+        drone.thermal_scan()
+
+        real_signature_detected = bool(model.has_survivor_signature(drone.x, drone.y))
+        false_alarm = (not real_signature_detected) and (random.random() < 0.20)
+        thermal_signature_detected = real_signature_detected or false_alarm
+
+        status = "unconfirmed" if thermal_signature_detected else "clear"
+        drone.last_scan_result = status
+        model.update_shared_memory((drone.x, drone.y), status)
+
+        result: dict[str, object] = {
+            "drone_id": drone_id,
+            "position": [int(drone.x), int(drone.y)],
+            "status": status,
+            "thermal_signature_detected": thermal_signature_detected,
+            "false_alarm_probability": 0.20,
+            "false_alarm_triggered": false_alarm,
+        }
+
+        if thermal_signature_detected:
+            result["verification_required"] = True
+            result["verification_note"] = (
+                "Thermal signature detected. Assign a second drone to re-scan this same cell, "
+                "then proceed with multimodal verification if still unconfirmed."
+            )
+        else:
+            result["verification_required"] = False
+
+        return result
+
+
+@app.post("/agent/verify_survivor")
+def agent_verify_survivor(
+    payload: dict[str, int],
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+):
+    _require_backend_api_key(x_api_key)
+
+    try:
+        drone_id = int(payload["drone_id"])
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid payload: {exc}") from exc
+
+    with simulation_lock:
+        _, drone, _ = _resolve_drone(drone_id)
+        position = (int(drone.x), int(drone.y))
+
+        cell_status = model.shared_memory.get(position, "clear")
+        if cell_status != "unconfirmed":
+            return {
+                "drone_id": drone_id,
+                "position": [int(drone.x), int(drone.y)],
+                "status": "Not Confirmed",
+                "reason": "Cell is not marked unconfirmed",
+                "secondary_check_passed": False,
+            }
+
+        multimodal = {
+            "temperature": random.random() < 0.75,
+            "sound": random.random() < 0.60,
+            "shape": random.random() < 0.65,
+        }
+        positive_count = sum(1 for detected in multimodal.values() if detected)
+        secondary_check_passed = positive_count >= 2
+
+        status = "Confirmed Survivor" if secondary_check_passed else "Not Confirmed"
+        if status == "Confirmed Survivor":
+            verified_survivor_positions.add(position)
+            model.update_shared_memory(position, "survivor")
+        else:
+            model.update_shared_memory(position, "clear")
+
+        return {
+            "drone_id": drone_id,
+            "position": [int(drone.x), int(drone.y)],
+            "status": status,
+            "secondary_check_passed": secondary_check_passed,
+            "multimodal": multimodal,
+        }
+
+
+@app.post("/agent/plan_human_rescue_route")
+def agent_plan_human_rescue_route(
+    payload: dict[str, int],
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+):
+    _require_backend_api_key(x_api_key)
+
+    try:
+        x = int(payload["x"])
+        y = int(payload["y"])
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid payload: {exc}") from exc
+
+    with simulation_lock:
+        width = model.search_grid.shape[1]
+        height = model.search_grid.shape[0]
+        if not (0 <= x < width and 0 <= y < height):
+            raise HTTPException(status_code=400, detail="Survivor coordinates are outside the search grid")
+
+        destination = (x, y)
+        if destination not in verified_survivor_positions:
+            raise HTTPException(status_code=400, detail="Route denied: survivor at this location is not verified")
+
+        path, total_cost = model.find_path(COMMAND_AGENT_ORIGIN, destination)
+        return {
+            "status": "Human Rescue Route Ready",
+            "from": [int(COMMAND_AGENT_ORIGIN[0]), int(COMMAND_AGENT_ORIGIN[1])],
+            "to": [int(x), int(y)],
+            "path": [[int(px), int(py)] for px, py in path],
+            "total_cost": int(total_cost),
+            "algorithm": "A*",
+        }
+
+
 def _format_sse(event: str, data: dict[str, object]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 @app.get("/mission_log")
 def mission_log(
-    objective: str = "Start high-level mission planning from base (20,20).",
+    objective: str = (
+        "Start mission from base (20,20) and keep scanning until all 40x40 cells are covered. "
+        "Discover active drones first, assign the 4 drones to north/south/east/west search directions, "
+        "then repeatedly use move_to and thermal_scan on unscanned cells with battery-aware task allocation."
+    ),
 ) -> StreamingResponse:
     """Stream mission reasoning/events via Server-Sent Events (SSE)."""
     _ensure_simulation_running()

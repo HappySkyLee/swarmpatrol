@@ -93,16 +93,6 @@ class Drone(Agent):
         # One round elapses per call: deduct 1% battery, but never drop to 0%.
         self.battery = max(1, self.battery - 1)
 
-        # Publish discovered terrain status to shared model memory.
-        if hasattr(self.model, "update_shared_memory") and hasattr(self.model, "search_grid"):
-            existing = self.model.shared_memory.get((self.x, self.y))
-            if existing in {"survivor", "survivor_found", "confirmed"}:
-                status = "survivor"
-            else:
-                has_signature = bool(self.model.has_survivor_signature(self.x, self.y))
-                status = "unconfirmed" if has_signature else "clear"
-            self.model.update_shared_memory((self.x, self.y), status)
-
         return self.x, self.y
 
     def thermal_scan(self) -> str:
@@ -414,111 +404,12 @@ class SwarmModel(MesaModel):
             self._schedule_secondary_verification(unconfirmed_position, source_drone_index=-1)
 
     def step(self) -> None:
-        """Advance the simulation by 1 round (1 minute)."""
+        """Advance mission clock only; drone actions are MCP-commanded by the agent."""
         if self.mission_completed:
             return
 
         self.round_count += 1
         self.elapsed_minutes += 1
-
-        if self.mission_phase == "searching" and self._all_cells_scanned():
-            self._begin_return_to_base()
-
-        self._schedule_outstanding_secondary_checks()
-
-        for drone in self.drones:
-            if drone.state != "active":
-                continue
-
-            if self.mission_phase == "searching" and drone.mode != "recharging":
-                required_to_base = self._steps_to_origin(drone) + MIN_RETURN_RESERVE_BATTERY
-                if drone.battery <= required_to_base:
-                    drone.mode = "returning"
-                    drone.target = COMMAND_AGENT_ORIGIN
-
-            if self.mission_phase == "returning_to_base":
-                if (drone.x, drone.y) == COMMAND_AGENT_ORIGIN:
-                    drone.mode = "standby"
-                    drone.target = COMMAND_AGENT_ORIGIN
-                    continue
-
-                drone.mode = "returning"
-                drone.target = COMMAND_AGENT_ORIGIN
-                drone.move_to(
-                    COMMAND_AGENT_ORIGIN,
-                    constrain_to_assigned_zone=False,
-                    avoid_unconfirmed=False,
-                )
-                if (drone.x, drone.y) == COMMAND_AGENT_ORIGIN:
-                    drone.mode = "standby"
-                    drone.target = COMMAND_AGENT_ORIGIN
-                continue
-
-            if drone.mode == "verifying":
-                if drone.target is None:
-                    drone.mode = "exploring"
-                    continue
-
-                target = (int(drone.target[0]), int(drone.target[1]))
-                if (drone.x, drone.y) != target:
-                    drone.move_to(
-                        target,
-                        constrain_to_assigned_zone=False,
-                        avoid_unconfirmed=False,
-                    )
-
-                if (drone.x, drone.y) == target:
-                    verifier_index = self.drones.index(drone)
-                    self._resolve_secondary_verification(verifier_index, target)
-                continue
-
-            if drone.mode == "recharging":
-                if (drone.x, drone.y) != COMMAND_AGENT_ORIGIN:
-                    drone.mode = "returning"
-                    drone.target = COMMAND_AGENT_ORIGIN
-                else:
-                    drone.battery = min(100, drone.battery + RECHARGE_RATE_PER_ROUND)
-                    if drone.battery >= 100:
-                        drone.mode = "exploring"
-                        drone.target = None
-                    continue
-
-            if drone.mode != "returning":
-                required_to_base = self._steps_to_origin(drone) + MIN_RETURN_RESERVE_BATTERY
-                if drone.battery <= required_to_base:
-                    drone.mode = "returning"
-                    drone.target = COMMAND_AGENT_ORIGIN
-
-            if drone.mode == "returning":
-                if (drone.x, drone.y) == COMMAND_AGENT_ORIGIN:
-                    drone.mode = "recharging"
-                    drone.battery = min(100, drone.battery + RECHARGE_RATE_PER_ROUND)
-                    if drone.battery >= 100:
-                        drone.mode = "exploring"
-                        drone.target = None
-                    continue
-
-                drone.move_to(
-                    COMMAND_AGENT_ORIGIN,
-                    constrain_to_assigned_zone=False,
-                    avoid_unconfirmed=False,
-                )
-                if (drone.x, drone.y) == COMMAND_AGENT_ORIGIN:
-                    drone.mode = "recharging"
-                continue
-
-            if drone.target is None or (drone.x, drone.y) == drone.target:
-                self._assign_next_target(drone)
-
-            drone.move_to(drone.target)
-            drone.thermal_scan()
-            current_position = (drone.x, drone.y)
-            if self.shared_memory.get(current_position) == "unconfirmed":
-                source_index = self.drones.index(drone)
-                self._schedule_secondary_verification(current_position, source_index)
-
-        if self.mission_phase == "returning_to_base" and self._all_active_drones_at_origin():
-            self._mark_mission_complete()
 
     def find_path(
         self,

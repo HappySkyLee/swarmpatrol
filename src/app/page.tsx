@@ -387,6 +387,15 @@ export default function Home() {
       } catch { addLog(`[obs] ${e.data as string}`); }
     });
 
+    es.addEventListener("tool_call", (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data as string) as { tool?: string; message?: string };
+        addLog(`[tool:${data.tool ?? "?"}] ${data.message ?? e.data}`);
+      } catch {
+        addLog(`[tool] ${e.data as string}`);
+      }
+    });
+
     es.addEventListener("final", (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data as string) as { output?: string };
